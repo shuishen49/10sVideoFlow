@@ -1,6 +1,14 @@
+[![加入QQ群](https://img.shields.io/badge/QQ群-点击加入-blue.svg)](https://qm.qq.com/cgi-bin/qm/qr?k=kSKwz-HRqrddrALgfLqCp7C2-aGZqPlv&jump_from=webapi&authKey=KUwPZ1lgzoIXjwIf/AfQ0UFFhRcUAO8VAdZk2kVdrGHQhxyhlgn30vX1SCX5Lu8d) (群号: 83958598)
+
 # 10sVideoFlow · Grok Storyboard Preview
 
 本目录是一个本地分镜预览与右侧聊天桥接工具包，用于快速查看 `zhihe-storyboard-preview-flashback.html` 并通过本地 bridge 接入 OpenClaw Gateway。
+
+## 演示截图
+
+> 你可以直接把这张图发给用户用于演示。
+
+![预览页演示](./demo-screenshots/01-filled-home-1920x1080.png)
 
 ## 功能概览
 
@@ -16,6 +24,8 @@
 .
 ├─ assets/
 │  └─ zhihe-storyboard-preview-flashback.html
+├─ demo-screenshots/
+│  └─ 01-filled-home-1920x1080.png
 ├─ bridge-config.json
 ├─ bridge-server.js
 ├─ preview-server.js
@@ -41,7 +51,7 @@
 ### 3) 打开预览页
 
 ```text
-http://127.0.0.1:12731/zhihe-storyboard-preview-flashback.html?project=<projectId>
+http://127.0.0.1:12731/zhihe-storyboard-preview-flashback.html?chatBase=http://127.0.0.1:12732&chatPath=/v1/chat/completions
 ```
 
 ## 默认端口
@@ -53,7 +63,7 @@ http://127.0.0.1:12731/zhihe-storyboard-preview-flashback.html?project=<projectI
 ## 健康检查
 
 - 预览页：
-  - `http://127.0.0.1:12731/zhihe-storyboard-preview-flashback.html?project=<projectId>`
+  - `http://127.0.0.1:12731/zhihe-storyboard-preview-flashback.html?chatBase=http://127.0.0.1:12732&chatPath=/v1/chat/completions`
 - bridge：
   - `http://127.0.0.1:12732/health`
 - OpenClaw Gateway：
