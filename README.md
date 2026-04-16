@@ -29,26 +29,25 @@
 ├─ bridge-config.json
 ├─ bridge-server.js
 ├─ preview-server.js
-├─ start-chat-bridge.bat
-├─ start-local-preview.bat
+├─ 启动知合分镜预览-Node驱动.bat
 └─ SKILL.md
 ```
 
 ## 快速开始
 
-### 1) 启动聊天 bridge
+### 一键启动（推荐）
 
 双击运行：
 
-- `start-chat-bridge.bat`
+- `启动知合分镜预览-Node驱动.bat`
 
-### 2) 启动本地预览服务
+脚本会自动：
 
-双击运行：
+1. 启动聊天 bridge（`12732`）
+2. 启动预览服务（`12731`）
+3. 打开预览页
 
-- `start-local-preview.bat`
-
-### 3) 打开预览页
+默认打开地址：
 
 ```text
 http://127.0.0.1:12731/zhihe-storyboard-preview-flashback.html?chatBase=http://127.0.0.1:12732&chatPath=/v1/chat/completions
