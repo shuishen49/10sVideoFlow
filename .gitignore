@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.example
+desktop.ini
+**/__pycache__/
+*.pyc

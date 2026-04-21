@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "characterId": "C01",
+      "characterName": "苏甜",
+      "prompt": "young woman, short wet hair, determined eyes, noir comic style"
+    },
+    {
+      "characterId": "C02",
+      "characterName": "赫连城",
+      "prompt": "young man in dark coat, stern expression, storm night rim light"
+    }
+  ]
+}

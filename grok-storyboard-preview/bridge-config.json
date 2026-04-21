@@ -1,0 +1,69 @@
+{
+  "mode": "openclaw",
+  "gatewayBase": "http://127.0.0.1:18789",
+  "gatewayToken": "",
+  "gatewayChatPath": "/v1/chat/completions",
+  "gatewayHealthPath": "/healthz",
+  "gatewayReadyPath": "/readyz",
+  "defaultSessionKey": "main",
+  "allowSessionOverride": false,
+  "lobsterTaskSessionKey": "session:storyboard-lobster",
+  "lobsterTaskModel": "custom-154-12-46-107/gpt-5.4",
+  "defaultModel": "custom-154-12-46-107/gpt-5.4",
+  "fallbackModels": [
+    "custom-154-12-46-107/gpt-5.3-codex"
+  ],
+  "timeoutMs": 120000,
+  "openclawAdapter": "ready",
+  "linggan": {
+    "enabled": true,
+    "baseUrl": "https://uuerqapsftez.sealosgzg.site/",
+    "token": "",
+    "apiKey": "",
+    "size": "9:16",
+    "timeoutSec": 240,
+    "pythonCmd": "python"
+  },
+  "pic2api": {
+    "enabled": true,
+    "baseUrl": "https://www.pic2api.com/v1",
+    "apiKey": "",
+    "defaultModel": "sora2-pro",
+    "defaultSize": "1024x576",
+    "defaultDuration": 8,
+    "timeoutSec": 480,
+    "pollIntervalSec": 4,
+    "pythonCmd": "python"
+  },
+  "guard": {
+    "enabled": true,
+    "injectSystemPrompt": true,
+    "systemPrompt": "你是分镜生产助手。你只能处理三类任务：1) 剧本/分镜文本改写；2) 图片提示词与出图建议；3) 声音/配音/旁白文案。严禁建议或执行对预览网页本体及其启动脚本的修改（包括 html/js/css、bridge-server.js、start-local-preview.bat、start-chat-bridge.bat、bridge-config.json）。用户若请求网页改动，必须拒绝并引导其改剧本/图片/声音。",
+    "allowKeywords": [
+      "剧本",
+      "分镜",
+      "script",
+      "提示词",
+      "图片",
+      "图像",
+      "画面",
+      "配音",
+      "声音",
+      "音频",
+      "旁白",
+      "口播"
+    ],
+    "denyKeywords": [
+      ".html",
+      ".js",
+      ".css",
+      "网页",
+      "页面",
+      "预览页",
+      "bridge-server",
+      "bridge-config",
+      "start-local-preview",
+      "start-chat-bridge"
+    ]
+  }
+}
