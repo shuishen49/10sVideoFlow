@@ -35,6 +35,14 @@
     "pollIntervalSec": 4,
     "pythonCmd": "python"
   },
+  "dubbing": {
+    "enabled": true,
+    "provider": "dashscope",
+    "baseUrl": "https://dashscope.aliyuncs.com",
+    "designModel": "qwen-voice-design",
+    "ttsModel": "qwen3-tts-vd-realtime-2026-01-15",
+    "language": "zh"
+  },
   "guard": {
     "enabled": true,
     "injectSystemPrompt": true,

@@ -8,6 +8,7 @@ let currentVideoUrl = '';
 
 const CHAT_STORAGE_KEY = 'grok_storyboard_chat_history_v1';
 const CHAT_CONFIG_KEY = 'grok_storyboard_chat_config_v2';
+const CHAT_PANE_COLLAPSED_KEY = 'grok_storyboard_chat_pane_collapsed_v1';
 const DEFAULT_CHAT_PATH = '/v1/chat/completions';
 const STORY_OUTLINE_DRAFT_KEY = 'grok_storyboard_story_outline_draft_v1';
 const PROJECT_CHARACTERS_DRAFT_KEY = 'grok_storyboard_project_characters_draft_v1';
@@ -26,6 +27,8 @@ let pendingCharacterChanges = [];
 let pendingCharacterPlan = [];
 let chatHistory = [];
 let chatSending = false;
+let chatAbortController = null;
+let outlineAutoApplyEnabled = true;
 let editMode = 'outline'; // outline | character
 
 function q(id){ return document.getElementById(id); }
@@ -257,18 +260,23 @@ function refreshEditModeUi(){
     if(title) title.textContent = '角色修改助手（已接本地 bridge）';
     if(sub) sub.textContent = '这里专门用于“修改角色设定”。你提要求，我来给出角色修改结果，并同步到角色编辑区。';
     if(input) input.placeholder = '输入角色修改要求，按 Enter 提交（Shift+Enter 换行）';
-    if(btn && !chatSending) btn.textContent = '修改角色';
+    if(btn && !chatSending) btn.textContent = '发送';
     return;
   }
 
   if(title) title.textContent = '大纲修改助手（已接本地 bridge）';
-  if(sub) sub.textContent = '这里专门用于“修改故事大纲”。你提要求，我来改左侧大纲并自动写入。';
-  if(input) input.placeholder = '输入大纲修改要求，按 Enter 提交（Shift+Enter 换行）';
-  if(btn && !chatSending) btn.textContent = '修改大纲';
+  if(sub) sub.textContent = outlineAutoApplyEnabled
+    ? '这里专门用于“修改故事大纲”。你提要求，我来改左侧大纲并自动写入。'
+    : '当前是聊天模式：不会写入左侧大纲，只进行对话。';
+  if(input) input.placeholder = outlineAutoApplyEnabled
+    ? '输入大纲修改要求，按 Enter 提交（Shift+Enter 换行）'
+    : '输入聊天内容（仅对话，不写入大纲）';
+  if(btn && !chatSending) btn.textContent = '发送';
 }
 
 function switchToOutlineMode(){
   editMode = 'outline';
+  outlineAutoApplyEnabled = true;
   refreshEditModeUi();
   setStatus('已切换到：修改大纲');
 }
@@ -278,6 +286,18 @@ function switchToCharacterMode(){
   refreshEditModeUi();
   setStatus('已切换到：修改角色');
   openAddGlobalCharacterMenu();
+}
+
+function skipOutlineEdit(){
+  const input = q('chatInput');
+  if(input) input.value = '';
+  outlineAutoApplyEnabled = false;
+  if(chatAbortController){
+    try { chatAbortController.abort('user-cancel-outline-edit'); } catch {}
+  }
+  refreshEditModeUi();
+  setChatStatus('已切换为聊天模式：后续发送都不会写入左侧大纲。', true);
+  setStatus('已切换为纯聊天模式（不改大纲）');
 }
 
 function analyzeCharactersFromOutline(){
@@ -300,9 +320,9 @@ function setChatSendingState(sending){
   if(btn){
     btn.disabled = chatSending;
     if(chatSending){
-      btn.textContent = '修改中…';
+      btn.textContent = '发送中…';
     } else {
-      btn.textContent = editMode === 'character' ? '修改角色' : '修改大纲';
+      btn.textContent = '发送';
     }
   }
   if(input) input.disabled = chatSending;
@@ -332,6 +352,7 @@ function buildChatMessages(userText){
     content: String(m.text || ''),
   }));
 
+  const chatOnlyMode = isChatOnlyMode();
   const systemContent = editMode === 'character'
     ? [
         '你是角色修改助手。',
@@ -348,18 +369,28 @@ function buildChatMessages(userText){
         '当前角色JSON如下：',
         JSON.stringify({ characters: currentChars }, null, 2),
       ].join('\n')
-    : [
-        '你是故事大纲修改助手。',
-        `当前项目：${project}。`,
-        '你只做一件事：根据用户要求修改“故事大纲”。不要聊无关话题。',
-        '每次都必须输出完整新大纲，并包含以下结构化区块（用于自动写回左侧）：',
-        '[OUTLINE_UPDATE]',
-        '这里放完整新大纲正文（纯文本，可分行）',
-        '[/OUTLINE_UPDATE]',
-        '区块外可补充 1-2 句简短说明。',
-        '当前左侧故事大纲如下：',
-        currentOutline,
-      ].join('\n');
+    : (chatOnlyMode
+      ? [
+          '你是对话助手。',
+          `当前项目：${project}。`,
+          '当前处于纯聊天模式：禁止输出 [OUTLINE_UPDATE]，也不要改写/重写故事大纲。',
+          '用户发什么，你就正常对话回答。',
+          '若用户想恢复大纲修改，请提示点击“修改大纲”按钮。',
+          '当前左侧故事大纲如下（仅供参考，不要改写）：',
+          currentOutline,
+        ].join('\n')
+      : [
+          '你是故事大纲修改助手。',
+          `当前项目：${project}。`,
+          '你只做一件事：根据用户要求修改“故事大纲”。不要聊无关话题。',
+          '每次都必须输出完整新大纲，并包含以下结构化区块（用于自动写回左侧）：',
+          '[OUTLINE_UPDATE]',
+          '这里放完整新大纲正文（纯文本，可分行）',
+          '[/OUTLINE_UPDATE]',
+          '区块外可补充 1-2 句简短说明。',
+          '当前左侧故事大纲如下：',
+          currentOutline,
+        ].join('\n'));
 
   return [
     { role: 'system', content: systemContent },
@@ -372,6 +403,10 @@ function detectOutlineEditIntent(text=''){
   const t = String(text || '').trim();
   if(!t) return false;
   return /(修改|重写|优化|调整|改写|补充|完善).{0,8}(故事大纲|大纲)|(故事大纲|大纲).{0,8}(修改|重写|优化|调整|改写|补充|完善)/.test(t);
+}
+
+function isChatOnlyMode(){
+  return editMode === 'outline' && !outlineAutoApplyEnabled;
 }
 
 function splitReplyForOutline(replyText='', outlineIntent=false){
@@ -576,11 +611,12 @@ function normalizeAssistantContent(content){
   return '';
 }
 
-async function doChatRequest(url, body, headers){
+async function doChatRequest(url, body, headers, signal){
   const resp = await fetch(url, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
+    signal,
   });
   const rawText = await resp.text();
   let data = null;
@@ -630,10 +666,12 @@ async function requestChatCompletion(userText, options = {}){
   };
   const headers = { 'Content-Type': 'application/json' };
   if(cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
+  const signal = options?.signal;
 
   try {
-    return await doChatRequest(primaryUrl, body, headers);
+    return await doChatRequest(primaryUrl, body, headers, signal);
   } catch (err) {
+    if(signal?.aborted || String(err?.name || '').toLowerCase() === 'aborterror') throw err;
     const base = normalizeBaseUrl(cfg.base || getDefaultChatBase());
     const currentPath = normalizeApiPath(cfg.path || DEFAULT_CHAT_PATH);
     const isDefaultBase = base === getDefaultChatBase();
@@ -647,7 +685,7 @@ async function requestChatCompletion(userText, options = {}){
 
     // 优先模型不可用时，自动回退到默认模型
     if(shouldFallbackModel && fallbackModel && fallbackModel !== primaryModel){
-      const reply = await doChatRequest(primaryUrl, { ...body, model: fallbackModel }, headers);
+      const reply = await doChatRequest(primaryUrl, { ...body, model: fallbackModel }, headers, signal);
       setChatStatus(`指定模型 ${primaryModel} 不可用，已自动回退到 ${fallbackModel}`, true);
       return reply;
     }
@@ -655,7 +693,7 @@ async function requestChatCompletion(userText, options = {}){
     // 兜底1：本地 bridge 默认模型不可用时，自动切到稳定 provider/model
     if (isDefaultBase && isLikelyServiceUnavailable(errMsg)) {
       const stableModel = 'custom-154-12-46-107/gpt-5.4';
-      const reply = await doChatRequest(primaryUrl, { ...body, model: stableModel }, headers);
+      const reply = await doChatRequest(primaryUrl, { ...body, model: stableModel }, headers, signal);
       try {
         const nextCfg = { ...cfg, model: stableModel };
         localStorage.setItem(CHAT_CONFIG_KEY, JSON.stringify(nextCfg));
@@ -673,7 +711,7 @@ async function requestChatCompletion(userText, options = {}){
     const retryBody = shouldFallbackModel && fallbackModel && fallbackModel !== primaryModel
       ? { ...body, model: fallbackModel }
       : body;
-    const reply = await doChatRequest(fallbackUrl, retryBody, headers);
+    const reply = await doChatRequest(fallbackUrl, retryBody, headers, signal);
     try {
       const nextCfg = { ...cfg, path: DEFAULT_CHAT_PATH };
       localStorage.setItem(CHAT_CONFIG_KEY, JSON.stringify(nextCfg));
@@ -796,6 +834,33 @@ function loadChat(){
   }
 }
 
+function readChatPaneCollapsed(){
+  try { return localStorage.getItem(CHAT_PANE_COLLAPSED_KEY) === '1'; } catch { return false; }
+}
+
+function writeChatPaneCollapsed(collapsed){
+  try { localStorage.setItem(CHAT_PANE_COLLAPSED_KEY, collapsed ? '1' : '0'); } catch {}
+}
+
+function applyChatPaneCollapsedState(collapsed){
+  const pane = q('chatPane');
+  const dock = q('chatPaneDockBtn');
+  const toggle = q('chatPaneToggleBtn');
+  if(pane) pane.classList.toggle('chat-pane-hidden', !!collapsed);
+  document.body.classList.toggle('chat-pane-collapsed', !!collapsed);
+  if(toggle){
+    toggle.textContent = collapsed ? '显示' : '隐藏';
+    toggle.setAttribute('aria-label', collapsed ? '显示修改助手面板' : '隐藏修改助手面板');
+  }
+  if(dock) dock.style.display = collapsed ? 'inline-flex' : 'none';
+}
+
+function toggleChatPane(force){
+  const next = typeof force === 'boolean' ? force : !readChatPaneCollapsed();
+  writeChatPaneCollapsed(next);
+  applyChatPaneCollapsedState(next);
+}
+
 function renderChat(){
   const box = q('chatMessages');
   if(!box) return;
@@ -829,8 +894,10 @@ async function sendChat(){
   input.value = '';
   setChatSendingState(true);
   setChatStatus(editMode === 'character' ? '正在生成角色修改建议…' : '正在生成修改后的大纲…');
+  const controller = new AbortController();
+  chatAbortController = controller;
   try {
-    const reply = await requestChatCompletion(text);
+    const reply = await requestChatCompletion(text, { signal: controller.signal });
     const replyText = reply || '接口返回空内容。';
 
     if(editMode === 'character'){
@@ -857,9 +924,11 @@ async function sendChat(){
         }
       }
     } else {
-      const parsed = splitReplyForOutline(replyText, true);
+      const parsed = splitReplyForOutline(replyText, outlineAutoApplyEnabled);
       addChat('bot', parsed.chatText || replyText);
-      if(parsed.outlineText){
+      if(!outlineAutoApplyEnabled){
+        setChatStatus('聊天模式：本次回复未写入左侧大纲。', true);
+      } else if(parsed.outlineText){
         const ok = writeLastBotToOutline('replace', parsed.outlineText);
         if(ok) setChatStatus('修改成功，左侧故事大纲已更新。', true);
         else setChatStatus('修改完成，但写入失败。', false);
@@ -868,10 +937,16 @@ async function sendChat(){
       }
     }
   } catch (err) {
-    const msg = `${editMode === 'character' ? '角色修改' : '大纲修改'}失败：${err?.message || err}`;
-    addChat('bot', msg);
-    setChatStatus(msg, false);
+    const aborted = controller.signal.aborted || String(err?.name || '').toLowerCase() === 'aborterror';
+    if(aborted){
+      setChatStatus('已取消本次请求。', true);
+    } else {
+      const msg = `${editMode === 'character' ? '角色修改' : '大纲修改'}失败：${err?.message || err}`;
+      addChat('bot', msg);
+      setChatStatus(msg, false);
+    }
   } finally {
+    if(chatAbortController === controller) chatAbortController = null;
     setChatSendingState(false);
     input.focus();
   }
@@ -1029,4 +1104,11 @@ function closeVideoBox(e, force=false){
     currentVideoUrl = '';
   }
 }
+
+window.toggleChatPane = toggleChatPane;
+window.skipOutlineEdit = skipOutlineEdit;
+
+(function initChatPaneCollapse(){
+  applyChatPaneCollapsedState(readChatPaneCollapsed());
+})();
 

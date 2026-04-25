@@ -8,7 +8,18 @@ const PROJECT_IMAGE_PROMPT_DRAFT_KEY = 'grok_storyboard_project_image_prompt_dra
 const PROJECT_SCENE_IMAGE_DRAFT_KEY = 'grok_storyboard_project_scene_image_draft_v1';
 const PROJECT_SCENE_IMAGE_HISTORY_KEY = 'grok_storyboard_project_scene_image_history_v1';
 const PROJECT_VIDEO_DRAFT_KEY = 'grok_storyboard_project_video_draft_v1';
+const PROJECT_VIDEO_PROMPT_DRAFT_KEY = 'grok_storyboard_project_video_prompt_draft_v1';
+const PROJECT_VIDEO_HISTORY_DELETED_KEY = 'grok_storyboard_project_video_history_deleted_v1';
 const VIDEO_GEN_OPTIONS_KEY = 'grok_storyboard_video_gen_options_v1';
+const VIDEO_GEN_TAIL_IMAGE_DRAFT_KEY = 'grok_storyboard_video_gen_tail_image_draft_v1';
+const PROJECT_DUBBING_VOICE_PROFILE_KEY = 'grok_storyboard_project_dubbing_voice_profile_v1';
+const PROJECT_DUBBING_RESULT_DRAFT_KEY = 'grok_storyboard_project_dubbing_result_draft_v1';
+const PROJECT_DUBBING_VOICE_ROLE_MANUAL_KEY = 'grok_storyboard_project_dubbing_voice_role_manual_v1';
+const PROJECT_DUBBING_VOICE_ROLE_EXCLUDED_KEY = 'grok_storyboard_project_dubbing_voice_role_excluded_v1';
+const PROJECT_DUBBING_VOICE_DESIGN_KEY = 'grok_storyboard_project_dubbing_voice_design_v1';
+const PROJECT_DUBBING_VOICE_PROMPT_LINE_KEY = 'grok_storyboard_project_dubbing_voice_prompt_line_v1';
+let dubbingVoicePreviewAudio = null;
+let dubbingVoicePreviewUtterance = null;
 
 function readProjectManualSegmentsMap(){
   try {
@@ -1339,13 +1350,15 @@ function render(project, segments, promptMap, bindingMap, videoMap, multiShotMap
   const tbody = q('tbody');
   tbody.innerHTML = '';
   const imagePromptDraftMap = getProjectImagePromptDraftMap(project);
+  const videoPromptDraftMap = getProjectVideoPromptDraftMap(project);
 
   segments.forEach((seg, idx)=>{
     const sid = String(seg.segmentId || seg.id || `S${String(idx+1).padStart(2,'0')}`);
     const script = composeScript(seg);
     const hasDraftPrompt = Object.prototype.hasOwnProperty.call(imagePromptDraftMap, sid);
     const imagePrompt = hasDraftPrompt ? String(imagePromptDraftMap[sid] || '') : (promptMap[sid] || defaultImagePrompt(seg));
-    const videoPrompt = resolveVideoPrompt(sid, seg, videoPromptMap);
+    const hasVideoDraftPrompt = Object.prototype.hasOwnProperty.call(videoPromptDraftMap, sid);
+    const videoPrompt = hasVideoDraftPrompt ? String(videoPromptDraftMap[sid] || '') : resolveVideoPrompt(sid, seg, videoPromptMap);
     const img = bindingMap[sid] || '';
     const multiShots = Array.isArray(multiShotMap[sid]) ? multiShotMap[sid] : [];
     const grid4 = grid4ImageMap[sid] || null;
@@ -1395,7 +1408,7 @@ function render(project, segments, promptMap, bindingMap, videoMap, multiShotMap
       <td>${idx+1}</td>
       <td>
         <div class="meta">${sid}</div>
-        <textarea>${script}</textarea>
+        <textarea class="script-input" data-sid="${escapeHtml(sid)}">${script}</textarea>
       </td>
       <td>
         ${castGridHtml}
@@ -1435,7 +1448,12 @@ function render(project, segments, promptMap, bindingMap, videoMap, multiShotMap
         }
         return `<button class="btn-primary" onclick="generateSceneImageWithLobster('${escapeHtml(project)}', '${escapeHtml(sid)}', this)">生成图片</button>`;
       })()}</td>
-      <td><textarea>${videoPrompt}</textarea></td>
+      <td>
+        <div style="position:relative;">
+          <textarea class="video-prompt-input" data-sid="${escapeHtml(sid)}">${videoPrompt}</textarea>
+          <button type="button" onclick="expandImagePromptEditor(this)" title="扩大编辑" style="position:absolute;top:6px;right:6px;padding:4px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.18);background:rgba(15,23,42,.75);color:#e5e7eb;cursor:pointer;">⤢</button>
+        </div>
+      </td>
       <td>${durationLabel(seg)}</td>
       <td>${videoCell}</td>
     `;
@@ -1500,8 +1518,14 @@ function render(project, segments, promptMap, bindingMap, videoMap, multiShotMap
     });
   });
 
+  // 手动修改剧情脚本即时保存
+  bindManualScriptDraftEvents(project);
+
   // 手动修改 Image Prompt 即时保存
   bindManualImagePromptDraftEvents(project);
+
+  // 手动修改 Video Prompt 即时保存
+  bindManualVideoPromptDraftEvents(project);
 
   // 顶部横向滚动条与表格底部滚动条同步（避免 F12 后底部滚动条不可见）
   bindStoryboardTopScroll();
@@ -1533,10 +1557,77 @@ function collectStoryboardRowsForPromptGen(){
   const rows = [...document.querySelectorAll('#tbody tr')];
   return rows.map((tr, idx) => {
     const sid = String(tr.querySelector('td:nth-child(2) .meta')?.textContent || '').trim();
-    const script = String(tr.querySelector('td:nth-child(2) textarea')?.value || '').trim();
+    const script = String(tr.querySelector('td:nth-child(2) textarea.script-input, td:nth-child(2) textarea')?.value || '').trim();
     const promptTextarea = tr.querySelector('td:nth-child(4) textarea');
     return { idx, sid, script, promptTextarea };
   }).filter(it => it.sid && it.promptTextarea);
+}
+
+function persistManualScriptsByRows(project = '', rows = []){
+  const p = String(project || '').trim();
+  if(!p) return;
+
+  const rowMap = {};
+  rows.forEach(it => {
+    const sid = String(it?.sid || '').trim();
+    if(!sid) return;
+    const val = String(it?.scriptTextarea?.value || '').replace(/\r/g, '').trim();
+    rowMap[sid] = val;
+  });
+  if(!Object.keys(rowMap).length) return;
+
+  const parseScriptToFields = (scriptText = '', fallback = {}) => {
+    const cleaned = String(scriptText || '').replace(/\r/g, '').trim();
+    if(!cleaned) return {
+      scene: String(fallback?.scene || '').trim(),
+      visual: String(fallback?.visual || fallback?.action || '').trim(),
+      action: String(fallback?.action || fallback?.visual || '').trim(),
+      dialogue: String(fallback?.dialogue || '').trim(),
+      text: String(fallback?.text || fallback?.script || '').trim(),
+    };
+    const parts = cleaned
+      .split(/[，,。！？；;\n]+/)
+      .map(x => String(x || '').trim())
+      .filter(Boolean);
+
+    const scene = parts[0] || String(fallback?.scene || '').trim();
+    const visual = parts[1] || String(fallback?.visual || fallback?.action || '').trim();
+    const dialogue = parts.slice(2).join('，') || String(fallback?.dialogue || '').trim();
+    return {
+      scene,
+      visual,
+      action: visual,
+      dialogue,
+      text: cleaned,
+      script: cleaned,
+    };
+  };
+
+  const manualSegments = getProjectManualSegments(p);
+  if(Array.isArray(manualSegments) && manualSegments.length){
+    const nextSegments = manualSegments.map(seg => {
+      const sid = String(seg?.segmentId || seg?.id || '').trim();
+      if(!sid || !Object.prototype.hasOwnProperty.call(rowMap, sid)) return seg;
+      const fields = parseScriptToFields(rowMap[sid], seg);
+      return {
+        ...seg,
+        ...fields,
+      };
+    });
+    setProjectManualSegments(p, nextSegments);
+  }
+
+  if(Array.isArray(latestOutlineSegments) && latestOutlineSegments.length){
+    latestOutlineSegments = latestOutlineSegments.map(seg => {
+      const sid = String(seg?.segmentId || seg?.id || '').trim();
+      if(!sid || !Object.prototype.hasOwnProperty.call(rowMap, sid)) return seg;
+      const fields = parseScriptToFields(rowMap[sid], seg);
+      return {
+        ...seg,
+        ...fields,
+      };
+    });
+  }
 }
 
 function persistGeneratedImagePromptsByRows(project = '', rows = []){
@@ -1631,17 +1722,20 @@ function applyCharacterStyleReferenceToAllPrompts(){
 }
 
 async function expandImagePromptEditor(btn){
-  const area = btn?.parentElement?.querySelector('textarea.image-prompt-input');
+  const area = btn?.parentElement?.querySelector('textarea.image-prompt-input, textarea.video-prompt-input');
   if(!area) return;
 
+  const isVideoPrompt = area.classList.contains('video-prompt-input');
   const sid = String(area.getAttribute('data-sid') || '').trim() || '-';
+  const promptKindLabel = isVideoPrompt ? '视频提示词' : '分镜图提示词';
+  const editorPlaceholder = isVideoPrompt ? 'AI 视频提示词...' : 'AI 分镜图提示词...';
 
   const mask = document.createElement('div');
   mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:9999;padding:16px;';
   mask.innerHTML = `
     <div class="w-full max-w-4xl max-h-[90vh] flex flex-col bg-[#1E2025] rounded-2xl border border-white/10 shadow-2xl overflow-hidden" style="width:min(100%,980px);max-height:90vh;display:flex;flex-direction:column;background:#1E2025;border:1px solid rgba(255,255,255,.1);border-radius:16px;overflow:hidden;">
       <div class="flex-shrink-0 flex items-center justify-between px-4 py-3 border-b border-white/10" style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.1);">
-        <h3 class="text-base font-medium text-white flex items-center gap-2" style="font-size:16px;font-weight:600;color:#fff;">提示词 - 分镜 #${escapeHtml(sid)}</h3>
+        <h3 class="text-base font-medium text-white flex items-center gap-2" style="font-size:16px;font-weight:600;color:#fff;">${promptKindLabel} - 分镜 #${escapeHtml(sid)}</h3>
         <div class="flex items-center gap-2" style="display:flex;gap:8px;">
           <button type="button" data-act="regen" class="px-3 py-1.5 text-sm font-medium rounded-lg transition-colors" style="padding:6px 12px;border-radius:8px;border:1px solid rgba(96,165,250,.35);background:rgba(59,130,246,.18);color:#93c5fd;">重新生成提示词</button>
           <button type="button" data-act="cancel" class="px-3 py-1.5 text-sm text-white/60 hover:text-white hover:bg-white/10 rounded-lg transition-colors" style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:transparent;color:rgba(255,255,255,.75);">取消</button>
@@ -1653,7 +1747,7 @@ async function expandImagePromptEditor(btn){
           <input data-role="req" placeholder="输入修改要求，例如：更压抑一些、减少镜头切换、增强情绪冲击" class="flex-1 min-w-0 px-3 py-2 rounded bg-white/5 border border-white/10 text-white/85 text-sm" style="flex:1;min-width:0;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.05);color:#e5e7eb;" />
           <button type="button" data-act="opt" disabled class="px-3 py-2 text-sm rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 disabled:opacity-50 disabled:cursor-not-allowed" style="padding:8px 10px;border-radius:8px;border:1px solid rgba(251,191,36,.3);background:rgba(251,191,36,.18);color:#fcd34d;opacity:.5;">按要求优化</button>
         </div>
-        <textarea data-role="editor" placeholder="AI 视频提示词..." class="w-full h-full min-h-[400px] p-4 rounded-lg bg-white/5 border border-white/10 text-white/90 text-sm resize-none" style="width:100%;height:100%;min-height:420px;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#f3f4f6;resize:none;"></textarea>
+        <textarea data-role="editor" placeholder="${editorPlaceholder}" class="w-full h-full min-h-[400px] p-4 rounded-lg bg-white/5 border border-white/10 text-white/90 text-sm resize-none" style="width:100%;height:100%;min-height:420px;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);color:#f3f4f6;resize:none;"></textarea>
       </div>
     </div>
   `;
@@ -1719,11 +1813,13 @@ async function expandImagePromptEditor(btn){
         '硬性要求：',
         '1) 9:16 竖版构图。',
         '2) 严格遵循当前段 script，不可改剧情。',
-        '3) 必须包含：场景、人物外观/动作、镜头景别、光线/色调、情绪。',
-        '4) 明确禁止：白底棚拍、纯人像证件照、与剧情冲突背景。',
-        '5) 提示词内必须写“画风参考”。若本段有出场人物，则画风参考要直接对齐该人物参考图；若本段没有出场人物，则沿用前文已建立的人物画风。',
-        '6) 禁止只写“整体都市电影感”这类泛化风格词，必须体现角色参考图风格一致性。',
-        '7) 只返回提示词正文，不要解释，不要代码块。',
+        '3) 必须包含：场景、人物动作、镜头景别、光线/色调、情绪。',
+        '4) 人物形象必须只写“按参考图人物生成/保持参考图一致”，不得描述任何外貌细节（五官、发型、年龄脸部特征等）与穿着细节（衣服款式/颜色/材质）。',
+        '5) 可以描述人物手里拿的道具或交互物，但不要改写人物外形设定。',
+        '6) 明确禁止：白底棚拍、纯人像证件照、与剧情冲突背景。',
+        '7) 提示词内必须写“画风参考”。若本段有出场人物，则画风参考要直接对齐该人物参考图；若本段没有出场人物，则沿用前文已建立的人物画风。',
+        '8) 禁止只写“整体都市电影感”这类泛化风格词，必须体现角色参考图风格一致性。',
+        '9) 只返回提示词正文，不要解释，不要代码块。',
         `【项目】${project}`,
         `【段号】${row.sid}`,
         `【出场人物】${castLine}`,
@@ -1774,6 +1870,20 @@ async function expandImagePromptEditor(btn){
       optBtn.textContent = oldText || '按要求优化';
       refreshOptState();
     }
+  });
+}
+
+function bindManualScriptDraftEvents(project = ''){
+  const p = String(project || '').trim();
+  if(!p) return;
+  const areas = [...document.querySelectorAll('#tbody textarea.script-input[data-sid]')];
+  areas.forEach(area => {
+    const sid = String(area.getAttribute('data-sid') || '').trim();
+    if(!sid) return;
+    const saveNow = () => persistManualScriptsByRows(p, [{ sid, scriptTextarea: area }]);
+    area.addEventListener('input', saveNow);
+    area.addEventListener('change', saveNow);
+    area.addEventListener('blur', saveNow);
   });
 }
 
@@ -2186,6 +2296,7 @@ async function generateSceneImageWithLobster(project, sid, button){
       }
       if(finalImageUrl){
         setProjectSceneImageDraft(p, s, finalImageUrl);
+        appendProjectSceneImageHistory(p, s, finalImageUrl);
       }
       if(finalImageUrl && latestRenderContext && latestRenderContext.project === p){
         latestRenderContext.bindingMap = latestRenderContext.bindingMap || {};
@@ -2385,6 +2496,1492 @@ function setPanelModalState(on = false){
   document.body.classList.toggle('panel-modal-open', !!on);
 }
 
+let currentMainPage = 'script';
+function switchMainPage(page = 'script'){
+  const next = String(page || 'script').trim() === 'dubbing' ? 'dubbing' : 'script';
+  currentMainPage = next;
+
+  const scriptWrap = q('scriptPageWrap');
+  const dubbingWrap = q('dubbingPageWrap');
+  const tabScript = q('tabScriptPage');
+  const tabDubbing = q('tabDubbingPage');
+
+  if(next === 'dubbing'){
+    if(scriptWrap) scriptWrap.classList.add('panel-hidden');
+    if(dubbingWrap) dubbingWrap.classList.remove('panel-hidden');
+    if(tabScript){ tabScript.classList.remove('active'); tabScript.setAttribute('aria-selected', 'false'); }
+    if(tabDubbing){ tabDubbing.classList.add('active'); tabDubbing.setAttribute('aria-selected', 'true'); }
+    // 切换到配音页时，确保放大面板状态关闭
+    toggleOutlinePanel(false);
+    toggleCharacterPanel(false);
+    setPanelModalState(false);
+    if(typeof renderDubbingVoiceProfiles === 'function') renderDubbingVoiceProfiles();
+    if(typeof restoreProjectDubbingDraftToUi === 'function') restoreProjectDubbingDraftToUi(true);
+    setStatus('已切换到配音页面');
+    return;
+  }
+
+  if(scriptWrap) scriptWrap.classList.remove('panel-hidden');
+  if(dubbingWrap) dubbingWrap.classList.add('panel-hidden');
+  if(tabScript){ tabScript.classList.add('active'); tabScript.setAttribute('aria-selected', 'true'); }
+  if(tabDubbing){ tabDubbing.classList.remove('active'); tabDubbing.setAttribute('aria-selected', 'false'); }
+  setStatus('已切换到剧本页面');
+
+  // 返回剧本页时重算顶部滚动条宽度
+  if(typeof bindStoryboardTopScroll === 'function') bindStoryboardTopScroll();
+}
+
+function collectSegmentsForDubbing(){
+  // 1) 优先读取“左侧当前可见分镜表”的 Script 列（避免吃到旧缓存）
+  const tbody = q('tbody');
+  const fromTable = tbody
+    ? [...tbody.querySelectorAll('tr')].map((tr, idx) => {
+        const sid = String(tr.querySelector('td:nth-child(2) .meta')?.textContent || `S${String(idx + 1).padStart(2, '0')}`).trim();
+        const script = String(tr.querySelector('td:nth-child(2) textarea')?.value || '').replace(/\s+/g, ' ').trim();
+        return { sid, script };
+      }).filter(x => x.script)
+    : [];
+  if(fromTable.length) return fromTable;
+
+  // 2) 再读取左侧“故事大纲”文本框
+  const outlineText = String(q('storyOutline')?.value || '').trim();
+  if(outlineText){
+    const chunks = outlineText
+      .split(/\n{2,}|(?<=[。！？!?])\s*/g)
+      .map(s => s.trim())
+      .filter(Boolean)
+      .slice(0, 120);
+    if(chunks.length){
+      return chunks.map((script, idx) => ({
+        sid: `S${String(idx + 1).padStart(2, '0')}`,
+        script,
+      }));
+    }
+  }
+
+  // 3) 最后才回退到内存分段（可能是历史数据）
+  const raw = Array.isArray(latestOutlineSegments) ? latestOutlineSegments : [];
+  return raw.map((seg, idx) => {
+    const sid = String(seg?.segmentId || seg?.id || `S${String(idx + 1).padStart(2, '0')}`).trim();
+    const script = [seg?.dialogue, seg?.action, seg?.visual, seg?.scene, seg?.script, seg?.content]
+      .map(v => String(v || '').trim())
+      .filter(Boolean)
+      .join('；');
+    return { sid, script };
+  }).filter(x => x.script);
+}
+
+function pickToneByText(text = ''){
+  const t = String(text || '');
+  if(/[！!]|愤怒|生气|怒吼|发火|拍桌/.test(t)) return '生气地说';
+  if(/[？?]|疑惑|不解|纳闷|怎么/.test(t)) return '疑惑地说';
+  if(/哭|哽咽|难过|悲伤|心碎/.test(t)) return '伤心地说';
+  if(/笑|开心|兴奋|激动|惊喜/.test(t)) return '兴奋地说';
+  if(/低声|悄悄|小声/.test(t)) return '小声地说';
+  return '平静地说';
+}
+
+function sanitizeDubbingOutput(text = ''){
+  let t = String(text || '').trim();
+  if(!t) return '';
+  t = t.replace(/苏甜/g, '黑猫记者').replace(/赫连城/g, '龙虾助手');
+  return t;
+}
+
+let dubbingLineRows = [];
+const dubbingPreviewBusyRows = new Set();
+const dubbingLinePreviewAudioMap = new Map();
+
+function setDubbingPreviewBusyUi(index = -1, busy = false){
+  const i = Number(index);
+  if(i < 0) return;
+  const wrap = q('dubbingListEditor');
+  if(!wrap) return;
+  const btns = wrap.querySelectorAll(`button[data-dubbing-row="${i}"][data-dubbing-action]`);
+  const allowedDuringBusy = new Set(['move-up', 'move-down']);
+  btns.forEach((btn) => {
+    const action = String(btn.dataset.dubbingAction || '').trim();
+    const baseLabel = String(btn.dataset.label || btn.textContent || '').trim();
+    btn.dataset.label = baseLabel;
+    if(busy){
+      if(allowedDuringBusy.has(action)){
+        btn.disabled = false;
+        btn.style.opacity = '';
+        btn.style.pointerEvents = '';
+        btn.textContent = baseLabel || (action === 'move-up' ? '↑' : '↓');
+        return;
+      }
+      btn.disabled = true;
+      btn.style.opacity = '0.55';
+      btn.style.pointerEvents = 'none';
+      btn.textContent = action === 'refresh' ? '生成中…' : (action === 'remove' ? '处理中…' : (action === 'download-local' ? '缓存中…' : '试听中…'));
+    }else{
+      btn.disabled = false;
+      btn.style.opacity = '';
+      btn.style.pointerEvents = '';
+      btn.textContent = baseLabel || (action === 'refresh' ? '刷新' : (action === 'remove' ? '删除' : '试听'));
+    }
+  });
+  if(!busy) setDubbingLineLocalButtons(i);
+}
+
+function getDubbingLineCacheKeyByRow(row = {}){
+  const speaker = String(row?.speaker || '').trim().slice(0, 1).toUpperCase();
+  const role = String(row?.role || '').trim();
+  const tone = String(row?.tone || '').trim();
+  const text = String(row?.text || '').trim();
+  return `${speaker}::${role}::${tone}::${text}`;
+}
+
+function hasCachedDubbingLineAudio(index = -1){
+  const i = Number(index);
+  if(i < 0 || i >= dubbingLineRows.length) return false;
+  const key = getDubbingLineCacheKeyByRow(dubbingLineRows[i]);
+  return !!(key && dubbingLinePreviewAudioMap.get(key)?.blobUrl);
+}
+
+function setDubbingLineLocalButtons(index = -1){
+  const i = Number(index);
+  if(i < 0) return;
+  const wrap = q('dubbingListEditor');
+  if(!wrap) return;
+  const enabled = hasCachedDubbingLineAudio(i);
+  const actions = ['preview', 'play-local', 'download-local'];
+  actions.forEach((action) => {
+    const btn = wrap.querySelector(`button[data-dubbing-row="${i}"][data-dubbing-action="${action}"]`);
+    if(!btn) return;
+    btn.disabled = !enabled;
+    btn.style.opacity = enabled ? '' : '0.45';
+    btn.style.pointerEvents = enabled ? '' : 'none';
+  });
+}
+
+function clearDubbingLineCacheByRow(row = {}){
+  const key = getDubbingLineCacheKeyByRow(row);
+  if(!key) return;
+  const cached = dubbingLinePreviewAudioMap.get(key);
+  if(cached?.blobUrl){
+    try { URL.revokeObjectURL(cached.blobUrl); } catch {}
+  }
+  dubbingLinePreviewAudioMap.delete(key);
+}
+
+function pickDubbingLineFileName(index = -1, role = ''){
+  const i = Number(index);
+  const safeRole = String(role || `line-${i + 1}`)
+    .replace(/[\\/:*?"<>|\s]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 24) || `line-${i + 1}`;
+  const no = String(i + 1).padStart(2, '0');
+  return `dubbing_${no}_${safeRole}.mp3`;
+}
+
+async function cacheDubbingLineAudio(index = -1, audioUrl = '', role = ''){
+  const i = Number(index);
+  if(i < 0 || i >= dubbingLineRows.length) return null;
+  const row = dubbingLineRows[i] || {};
+  const key = getDubbingLineCacheKeyByRow(row);
+  if(!key || !audioUrl) return null;
+  const resp = await fetch(audioUrl);
+  if(!resp.ok) throw new Error(`下载音频失败 HTTP ${resp.status}`);
+  const blob = await resp.blob();
+  if(!blob || !blob.size) throw new Error('音频缓存为空');
+  const old = dubbingLinePreviewAudioMap.get(key);
+  if(old?.blobUrl){
+    try { URL.revokeObjectURL(old.blobUrl); } catch {}
+  }
+  const blobUrl = URL.createObjectURL(blob);
+  const fileName = pickDubbingLineFileName(i, role);
+  const cached = { blob, blobUrl, fileName, mime: blob.type || 'audio/mpeg', createdAt: Date.now() };
+  dubbingLinePreviewAudioMap.set(key, cached);
+  return cached;
+}
+
+function playLocalDubbingLine(index = -1){
+  const i = Number(index);
+  if(i < 0 || i >= dubbingLineRows.length) return;
+  const row = dubbingLineRows[i] || {};
+  const role = String(row.role || '').trim();
+  const key = getDubbingLineCacheKeyByRow(row);
+  const cached = key ? dubbingLinePreviewAudioMap.get(key) : null;
+  if(!cached?.blobUrl){
+    setStatus(`第${i + 1}句暂无本地缓存，请先点“试听”生成`, false);
+    setDubbingLineLocalButtons(i);
+    return;
+  }
+  if(dubbingVoicePreviewAudio){
+    try { dubbingVoicePreviewAudio.pause(); } catch {}
+    dubbingVoicePreviewAudio = null;
+  }
+  if(dubbingVoicePreviewUtterance && window.speechSynthesis){
+    try { window.speechSynthesis.cancel(); } catch {}
+    dubbingVoicePreviewUtterance = null;
+  }
+  dubbingVoicePreviewAudio = new Audio(cached.blobUrl);
+  dubbingVoicePreviewAudio.play().catch(() => {});
+  setStatus(`正在播放第${i + 1}句本地缓存（${role || '未命名角色'}）`);
+}
+
+function downloadLocalDubbingLine(index = -1){
+  const i = Number(index);
+  if(i < 0 || i >= dubbingLineRows.length) return;
+  const row = dubbingLineRows[i] || {};
+  const key = getDubbingLineCacheKeyByRow(row);
+  const cached = key ? dubbingLinePreviewAudioMap.get(key) : null;
+  if(!cached?.blobUrl){
+    setStatus(`第${i + 1}句暂无可下载音频，请先点“试听”`, false);
+    setDubbingLineLocalButtons(i);
+    return;
+  }
+  const a = document.createElement('a');
+  a.href = cached.blobUrl;
+  a.download = cached.fileName || pickDubbingLineFileName(i, row.role);
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setStatus(`第${i + 1}句已下载到本地：${a.download}`);
+}
+
+function parseDubbingRowsFromText(text = ''){
+  const lines = String(text || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const rows = [];
+  lines.forEach(line => {
+    if(/^#/.test(line)) return;
+    const m = line.match(/^([A-Z])(?:\(([^)]+)\))?([^：:]*)[：:](.+)$/);
+    if(m){
+      rows.push({
+        speaker: String(m[1] || '').trim() || 'A',
+        role: String(m[2] || '').trim(),
+        tone: String(m[3] || '').trim(),
+        text: String(m[4] || '').trim(),
+      });
+    } else {
+      rows.push({ speaker: 'A', role: '', tone: '平静地说', text: line });
+    }
+  });
+  return rows;
+}
+
+function serializeDubbingRowsToText(rows = []){
+  const list = Array.isArray(rows) ? rows : [];
+  return list
+    .map(row => {
+      const sp = String(row?.speaker || 'A').trim().slice(0, 1).toUpperCase() || 'A';
+      const role = String(row?.role || '').trim();
+      const tone = String(row?.tone || '').trim();
+      const text = String(row?.text || '').trim();
+      if(!text) return '';
+      return `${sp}${role ? `(${role})` : ''}${tone}：${text}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function getDubbingAvatarByRole(role = ''){
+  const r = String(role || '').trim();
+  if(/黑猫|猫/.test(r)) return '🐱';
+  if(/龙虾/.test(r)) return '🦞';
+  if(/旁白|解说|画外音/.test(r)) return '🎙️';
+  return '🎤';
+}
+
+function syncDubbingTextFromEditor(shouldPersist = true){
+  const outputEl = q('dubbingResult');
+  if(!outputEl) return;
+  outputEl.value = serializeDubbingRowsToText(dubbingLineRows);
+  if(shouldPersist) persistProjectDubbingDraftFromUi();
+}
+
+function renderDubbingListEditorFromText(text = ''){
+  const wrap = q('dubbingListEditor');
+  if(!wrap) return;
+  dubbingLineRows = parseDubbingRowsFromText(text);
+  if(!dubbingLineRows.length){
+    wrap.innerHTML = '<div class="meta" style="padding:12px;border:1px dashed rgba(255,255,255,.18);border-radius:12px;">暂无配音台词，点击「一键分析剧本」或「+ 新增一条」。</div>';
+    return;
+  }
+
+  const rowsHtml = dubbingLineRows.map((row, idx) => {
+    const avatar = getDubbingAvatarByRole(row.role);
+    const roleName = escapeHtml(row.role || '未命名角色');
+    const tone = escapeHtml(row.tone || '平静地说');
+    const textValue = escapeHtml(row.text || '');
+    const speakerValue = escapeHtml((row.speaker || 'A').toUpperCase());
+    const localReady = hasCachedDubbingLineAudio(idx);
+    const localBtnStyle = localReady ? '' : 'opacity:.45;pointer-events:none;';
+    const previewBtnStyle = localReady ? '' : 'opacity:.45;pointer-events:none;';
+    return `<div style="background:#14161c;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:12px 14px;display:flex;align-items:center;gap:12px;">
+      <div style="width:150px;flex-shrink:0;display:flex;align-items:center;gap:8px;">
+        <div style="width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#1c1f26;border:1px solid rgba(255,255,255,.14);">${avatar}</div>
+        <div style="min-width:0;">
+          <div style="font-size:13px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${roleName}</div>
+          <div style="font-size:11px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${tone}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex:1;min-width:0;">
+        <input value="${speakerValue}" oninput="updateDubbingLineField(${idx}, 'speaker', this.value)" maxlength="1" style="width:40px;border-radius:8px;border:1px solid rgba(255,255,255,.14);background:#0f1117;color:#e2e8f0;padding:7px 8px;text-align:center;" />
+        <input value="${escapeHtml(row.role || '')}" oninput="updateDubbingLineField(${idx}, 'role', this.value)" placeholder="角色名" style="width:130px;border-radius:8px;border:1px solid rgba(255,255,255,.14);background:#0f1117;color:#e2e8f0;padding:7px 8px;" />
+        <input value="${escapeHtml(row.tone || '')}" oninput="updateDubbingLineField(${idx}, 'tone', this.value)" placeholder="语气（如：平静地说）" style="width:160px;border-radius:8px;border:1px solid rgba(255,255,255,.14);background:#0f1117;color:#e2e8f0;padding:7px 8px;" />
+        <textarea oninput="updateDubbingLineField(${idx}, 'text', this.value)" rows="1" style="flex:1;min-width:0;border-radius:8px;border:1px solid rgba(255,255,255,.14);background:#0f1117;color:#e2e8f0;padding:7px 10px;line-height:1.5;">${textValue}</textarea>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+        <button class="btn-ghost" data-dubbing-row="${idx}" data-dubbing-action="preview" data-label="试听" title="试听" onclick="previewDubbingLine(${idx})" style="${previewBtnStyle}">试听</button>
+        <button class="btn-ghost" data-dubbing-row="${idx}" data-dubbing-action="refresh" data-label="重新生成音频" title="重新生成音频" onclick="refreshDubbingLine(${idx})">重新生成音频</button>
+        <button class="btn-ghost" data-dubbing-row="${idx}" data-dubbing-action="play-local" data-label="本地预览" title="播放已缓存音频" onclick="playLocalDubbingLine(${idx})" style="${localBtnStyle}">本地预览</button>
+        <button class="btn-ghost" data-dubbing-row="${idx}" data-dubbing-action="download-local" data-label="下载" title="下载本地缓存音频" onclick="downloadLocalDubbingLine(${idx})" style="${localBtnStyle}">下载</button>
+        <button class="btn-ghost" data-dubbing-row="${idx}" data-dubbing-action="move-up" data-label="↑" title="上移" onclick="moveDubbingLineRow(${idx}, -1)">↑</button>
+        <button class="btn-ghost" data-dubbing-row="${idx}" data-dubbing-action="move-down" data-label="↓" title="下移" onclick="moveDubbingLineRow(${idx}, 1)">↓</button>
+        <button class="btn-ghost" data-dubbing-row="${idx}" data-dubbing-action="remove" data-label="删除" title="删除" onclick="removeDubbingLineRow(${idx})">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  wrap.innerHTML = rowsHtml;
+}
+
+function updateDubbingLineField(index = -1, field = '', value = ''){
+  const i = Number(index);
+  if(i < 0 || i >= dubbingLineRows.length) return;
+  const key = String(field || '').trim();
+  if(!key) return;
+  const oldRow = { ...(dubbingLineRows[i] || {}) };
+  if(key === 'speaker') dubbingLineRows[i][key] = String(value || '').trim().slice(0, 1).toUpperCase() || 'A';
+  else dubbingLineRows[i][key] = String(value || '').trim();
+  clearDubbingLineCacheByRow(oldRow);
+  syncDubbingTextFromEditor(true);
+  setDubbingLineLocalButtons(i);
+}
+
+function addDubbingLineRow(){
+  const nextSpeaker = String.fromCharCode(65 + (dubbingLineRows.length % 26));
+  dubbingLineRows.push({ speaker: nextSpeaker, role: '', tone: '平静地说', text: '' });
+  syncDubbingTextFromEditor(true);
+  renderDubbingListEditorFromText(q('dubbingResult')?.value || '');
+}
+
+function moveDubbingLineRow(index = -1, delta = 0){
+  const i = Number(index);
+  const d = Number(delta);
+  const j = i + d;
+  if(i < 0 || i >= dubbingLineRows.length || j < 0 || j >= dubbingLineRows.length) return;
+  const tmp = dubbingLineRows[i];
+  dubbingLineRows[i] = dubbingLineRows[j];
+  dubbingLineRows[j] = tmp;
+  syncDubbingTextFromEditor(true);
+  renderDubbingListEditorFromText(q('dubbingResult')?.value || '');
+}
+
+function removeDubbingLineRow(index = -1){
+  const i = Number(index);
+  if(i < 0 || i >= dubbingLineRows.length) return;
+  clearDubbingLineCacheByRow(dubbingLineRows[i] || {});
+  dubbingLineRows.splice(i, 1);
+  syncDubbingTextFromEditor(true);
+  renderDubbingListEditorFromText(q('dubbingResult')?.value || '');
+}
+
+async function previewDubbingLine(index = -1, forceRegenerate = false){
+  const i = Number(index);
+  if(i < 0 || i >= dubbingLineRows.length) return;
+  if(dubbingPreviewBusyRows.has(i)) return;
+
+  const row = dubbingLineRows[i] || {};
+  const role = String(row.role || '').trim();
+  const textOnly = String(row.text || '').trim();
+  const toneOnly = String(row.tone || '').trim();
+  if(!textOnly) return;
+
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  if(!project){
+    setStatus('请先选择项目', false);
+    return;
+  }
+  if(!role){
+    setStatus('该台词未填写角色名，无法调用千问试听', false);
+    return;
+  }
+
+  // 只朗读台词正文，不拼接 role/tone（如“黑猫记者”“平静地说”只用于音色控制）
+  const previewText = textOnly;
+  const base = getBridgeBase();
+  let design = getProjectDubbingVoiceDesign(project, role) || {};
+  let voiceId = String(design?.voiceId || design?.voice || '').trim();
+
+  // 行内试听/刷新严格只做“已设计音色 + 当前台词 text”预览，不提交 voice design prompt。
+  // 避免把角色设定提示词误带入 /api/dubbing/voice/preview，触发上游不必要分支。
+
+  dubbingPreviewBusyRows.add(i);
+  setDubbingPreviewBusyUi(i, true);
+  setStatus(forceRegenerate ? `正在重新生成第${i + 1}句音频…` : `正在生成第${i + 1}句试听音频…`);
+
+  try {
+    if(!voiceId){
+      throw new Error(`角色「${role}」尚未在上方“音色设计”中完成设置，请先设计音色后再试听`);
+    }
+
+    // 行内“试听”优先播放该行最近一次生成并缓存的音频（例如点过“重新生成音频”后），
+    // 不要回退成上方“音色设计试听”，避免出现“试听和重新生成结果不一致”。
+    const cacheKey = getDubbingLineCacheKeyByRow(row);
+    const cachedLocal = (!forceRegenerate && cacheKey) ? dubbingLinePreviewAudioMap.get(cacheKey) : null;
+    if(!forceRegenerate && cachedLocal?.blobUrl){
+      if(dubbingVoicePreviewAudio){
+        try { dubbingVoicePreviewAudio.pause(); } catch {}
+        dubbingVoicePreviewAudio = null;
+      }
+      if(dubbingVoicePreviewUtterance && window.speechSynthesis){
+        try { window.speechSynthesis.cancel(); } catch {}
+        dubbingVoicePreviewUtterance = null;
+      }
+      dubbingVoicePreviewAudio = new Audio(cachedLocal.blobUrl);
+      await dubbingVoicePreviewAudio.play().catch(() => {});
+      setStatus(`正在试听第${i + 1}句（${role}，使用本行已缓存音频）`);
+      setDubbingLineLocalButtons(i);
+      return;
+    }
+
+    // 若该行还没有本地缓存，试听才使用上方“音色设计”返回的 preview 音频兜底。
+    // 刷新(forceRegenerate=true)始终走后端重生成。
+    const designedPreviewAudioUrl = String(design?.previewAudioUrl || '').trim();
+    if(!forceRegenerate && designedPreviewAudioUrl){
+      if(dubbingVoicePreviewAudio){
+        try { dubbingVoicePreviewAudio.pause(); } catch {}
+        dubbingVoicePreviewAudio = null;
+      }
+      if(dubbingVoicePreviewUtterance && window.speechSynthesis){
+        try { window.speechSynthesis.cancel(); } catch {}
+        dubbingVoicePreviewUtterance = null;
+      }
+      const cached = await cacheDubbingLineAudio(i, designedPreviewAudioUrl, role);
+      const playUrl = String(cached?.blobUrl || designedPreviewAudioUrl).trim();
+      dubbingVoicePreviewAudio = new Audio(playUrl);
+      await dubbingVoicePreviewAudio.play().catch(() => {});
+      setStatus(`正在试听第${i + 1}句（${role}，使用已设计音色试听）`);
+      setDubbingLineLocalButtons(i);
+      if(typeof renderDubbingVoiceProfiles === 'function'){
+        renderDubbingVoiceProfiles();
+      }
+      return;
+    }
+
+    // 配音区只读取“已设计好的音色”来朗读本行台词，不在这里写回角色设计，
+    // 避免点击下方“试听/刷新”污染上方“音色设计”内容。
+
+    const previewReqBody = {
+      project,
+      role,
+      voiceId,
+      text: previewText,
+      forceRegenerate: !!forceRegenerate,
+      reuseDesignedPreview: !forceRegenerate,
+    };
+    const previewResp = await fetch(`${base}/api/dubbing/voice/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(previewReqBody),
+    });
+    const previewData = await previewResp.json().catch(() => ({}));
+    if(!previewResp.ok || !previewData?.ok){
+      throw new Error(previewData?.error?.message || previewData?.error || `试听失败 HTTP ${previewResp.status}`);
+    }
+
+    const audioUrl = String(previewData?.audioUrl || previewData?.url || design?.previewAudioUrl || '').trim();
+    const finalPreviewText = String(previewData?.previewText || previewText).trim();
+    const useBrowserTTS = !audioUrl;
+
+    // 行内“试听/刷新”只用于当前台词音频预览，不回写角色音色档案，
+    // 避免污染上方“音色设计”的 provider/model/voice 展示。
+
+    if(dubbingVoicePreviewAudio){
+      try { dubbingVoicePreviewAudio.pause(); } catch {}
+      dubbingVoicePreviewAudio = null;
+    }
+    if(dubbingVoicePreviewUtterance && window.speechSynthesis){
+      try { window.speechSynthesis.cancel(); } catch {}
+      dubbingVoicePreviewUtterance = null;
+    }
+
+    if(useBrowserTTS && window.speechSynthesis && window.SpeechSynthesisUtterance){
+      const u = new SpeechSynthesisUtterance(finalPreviewText || previewText);
+      u.lang = 'zh-CN';
+      u.rate = 1.05;
+      dubbingVoicePreviewUtterance = u;
+      window.speechSynthesis.speak(u);
+      setStatus(`正在试听第${i + 1}句（${role}，浏览器预览）`);
+    }else{
+      if(!audioUrl) throw new Error('后端未返回可播放音频地址');
+      const cached = await cacheDubbingLineAudio(i, audioUrl, role);
+      const playUrl = String(cached?.blobUrl || audioUrl).trim();
+      dubbingVoicePreviewAudio = new Audio(playUrl);
+      await dubbingVoicePreviewAudio.play().catch(() => {});
+      if(forceRegenerate){
+        // 用户点击“重新生成音频”时，除播放外自动触发本地下载
+        downloadLocalDubbingLine(i);
+        setStatus(`第${i + 1}句音频已重新生成并自动下载（${role}）`);
+      }else{
+        setStatus(`正在试听第${i + 1}句（${role}，已缓存可下载）`);
+      }
+      setDubbingLineLocalButtons(i);
+    }
+
+    if(typeof renderDubbingVoiceProfiles === 'function'){
+      renderDubbingVoiceProfiles();
+    }
+  } catch (err) {
+    setStatus(`试听失败（${role || `第${i + 1}句`}）：${err?.message || err}`, false);
+  } finally {
+    dubbingPreviewBusyRows.delete(i);
+    setDubbingPreviewBusyUi(i, false);
+  }
+}
+
+async function refreshDubbingLine(index = -1){
+  return previewDubbingLine(index, true);
+}
+
+function formatDubbingByRule(project = '', segments = []){
+  const rows = Array.isArray(segments) ? segments : [];
+  if(!rows.length) return '';
+
+  const speakers = ['A', 'B', 'C', 'D', 'E'];
+  let lineNo = 0;
+  const out = [];
+
+  const bannedNameRe = /(苏甜|赫连城)/g;
+  const forceMap = [
+    { re: /(黑猫记者|黑猫|记者)/, name: '黑猫记者', sp: 'A' },
+    { re: /(龙虾助手|龙虾|助手)/, name: '龙虾助手', sp: 'B' },
+    { re: /(旁白|画外音|镜头|场景|外景|内景)/, name: '旁白', sp: 'C' },
+  ];
+
+  for(const seg of rows){
+    const sid = String(seg?.sid || '').trim();
+    const text = String(seg?.script || '').trim();
+    if(!text) continue;
+
+    const cast = (typeof getProjectSegmentCast === 'function') ? getProjectSegmentCast(project, sid) : [];
+    const chunks = text
+      .split(/[。！？!?；;\n]/g)
+      .map(s => s.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+
+    if(!chunks.length) continue;
+    out.push(`# ${sid || '片段'}`);
+
+    chunks.forEach((chunk, idx) => {
+      const sp = speakers[(lineNo + idx) % speakers.length];
+      const tone = pickToneByText(chunk);
+
+      const cleanedChunk = chunk.replace(bannedNameRe, '');
+      const forced = forceMap.find(item => item.re.test(cleanedChunk));
+      if(forced){
+        out.push(`${forced.sp}(${forced.name})${tone}：${cleanedChunk}`);
+        return;
+      }
+
+      let roleName = Array.isArray(cast) && cast[idx] ? String(cast[idx]) : '';
+      roleName = roleName.replace(bannedNameRe, '').trim();
+      out.push(`${sp}${roleName ? `(${roleName})` : ''}${tone}：${cleanedChunk}`);
+    });
+    lineNo += chunks.length;
+    out.push('');
+  }
+
+  return out.join('\n').trim();
+}
+
+function readProjectDubbingVoiceProfileMap(){
+  try {
+    const raw = localStorage.getItem(PROJECT_DUBBING_VOICE_PROFILE_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveProjectDubbingVoiceProfileMap(map = {}){
+  try { localStorage.setItem(PROJECT_DUBBING_VOICE_PROFILE_KEY, JSON.stringify(map || {})); } catch {}
+}
+
+function readProjectDubbingResultDraftMap(){
+  try {
+    const raw = localStorage.getItem(PROJECT_DUBBING_RESULT_DRAFT_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveProjectDubbingResultDraftMap(map = {}){
+  try { localStorage.setItem(PROJECT_DUBBING_RESULT_DRAFT_KEY, JSON.stringify(map || {})); } catch {}
+}
+
+function getProjectDubbingResultDraft(project = ''){
+  const p = String(project || '').trim();
+  if(!p) return '';
+  const map = readProjectDubbingResultDraftMap();
+  return String(map?.[p] || '').trim();
+}
+
+function setProjectDubbingResultDraft(project = '', text = ''){
+  const p = String(project || '').trim();
+  if(!p) return;
+  const map = readProjectDubbingResultDraftMap();
+  const next = String(text || '').trim();
+  if(next) map[p] = next;
+  else delete map[p];
+  saveProjectDubbingResultDraftMap(map);
+}
+
+function readProjectDubbingVoiceRoleManualMap(){
+  try {
+    const raw = localStorage.getItem(PROJECT_DUBBING_VOICE_ROLE_MANUAL_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveProjectDubbingVoiceRoleManualMap(map = {}){
+  try { localStorage.setItem(PROJECT_DUBBING_VOICE_ROLE_MANUAL_KEY, JSON.stringify(map || {})); } catch {}
+}
+
+function getProjectDubbingVoiceManualRoles(project = ''){
+  const p = String(project || '').trim();
+  if(!p) return [];
+  const map = readProjectDubbingVoiceRoleManualMap();
+  const list = Array.isArray(map?.[p]) ? map[p] : [];
+  return [...new Set(list.map(s => String(s || '').trim()).filter(Boolean))];
+}
+
+function addProjectDubbingVoiceManualRole(project = '', roleName = ''){
+  const p = String(project || '').trim();
+  const r = String(roleName || '').trim();
+  if(!p || !r) return;
+  const map = readProjectDubbingVoiceRoleManualMap();
+  const list = new Set(Array.isArray(map?.[p]) ? map[p].map(s => String(s || '').trim()).filter(Boolean) : []);
+  list.add(r);
+  map[p] = [...list];
+  saveProjectDubbingVoiceRoleManualMap(map);
+}
+
+function removeProjectDubbingVoiceManualRole(project = '', roleName = ''){
+  const p = String(project || '').trim();
+  const r = String(roleName || '').trim();
+  if(!p || !r) return;
+  const map = readProjectDubbingVoiceRoleManualMap();
+  const list = new Set(Array.isArray(map?.[p]) ? map[p].map(s => String(s || '').trim()).filter(Boolean) : []);
+  list.delete(r);
+  if(list.size) map[p] = [...list];
+  else delete map[p];
+  saveProjectDubbingVoiceRoleManualMap(map);
+}
+
+function readProjectDubbingVoiceRoleExcludedMap(){
+  try {
+    const raw = localStorage.getItem(PROJECT_DUBBING_VOICE_ROLE_EXCLUDED_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveProjectDubbingVoiceRoleExcludedMap(map = {}){
+  try { localStorage.setItem(PROJECT_DUBBING_VOICE_ROLE_EXCLUDED_KEY, JSON.stringify(map || {})); } catch {}
+}
+
+function getProjectDubbingVoiceExcludedRoles(project = ''){
+  const p = String(project || '').trim();
+  if(!p) return new Set();
+  const map = readProjectDubbingVoiceRoleExcludedMap();
+  const list = Array.isArray(map?.[p]) ? map[p] : [];
+  return new Set(list.map(s => String(s || '').trim()).filter(Boolean));
+}
+
+function setProjectDubbingVoiceRoleExcluded(project = '', roleName = '', excluded = true){
+  const p = String(project || '').trim();
+  const r = String(roleName || '').trim();
+  if(!p || !r) return;
+  const map = readProjectDubbingVoiceRoleExcludedMap();
+  const set = new Set(Array.isArray(map?.[p]) ? map[p].map(s => String(s || '').trim()).filter(Boolean) : []);
+  if(excluded) set.add(r);
+  else set.delete(r);
+  if(set.size) map[p] = [...set];
+  else delete map[p];
+  saveProjectDubbingVoiceRoleExcludedMap(map);
+}
+
+function getProjectDubbingVoiceProfiles(project = ''){
+  const p = String(project || '').trim();
+  if(!p) return {};
+  const map = readProjectDubbingVoiceProfileMap();
+  const row = map[p];
+  return row && typeof row === 'object' ? row : {};
+}
+
+function setProjectRoleVoiceProfile(project = '', roleName = '', profile = null){
+  const p = String(project || '').trim();
+  const r = String(roleName || '').trim();
+  if(!p || !r) return;
+  const map = readProjectDubbingVoiceProfileMap();
+  if(!map[p] || typeof map[p] !== 'object') map[p] = {};
+  if(profile && typeof profile === 'object') map[p][r] = profile;
+  else delete map[p][r];
+  saveProjectDubbingVoiceProfileMap(map);
+}
+
+function readProjectDubbingVoiceDesignMap(){
+  try {
+    const raw = localStorage.getItem(PROJECT_DUBBING_VOICE_DESIGN_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveProjectDubbingVoiceDesignMap(map = {}){
+  try { localStorage.setItem(PROJECT_DUBBING_VOICE_DESIGN_KEY, JSON.stringify(map || {})); } catch {}
+}
+
+function getProjectDubbingVoiceDesign(project = '', roleName = ''){
+  const p = String(project || '').trim();
+  const r = String(roleName || '').trim();
+  if(!p || !r) return null;
+  const map = readProjectDubbingVoiceDesignMap();
+  const row = map?.[p]?.[r];
+  return row && typeof row === 'object' ? row : null;
+}
+
+function setProjectDubbingVoiceDesign(project = '', roleName = '', payload = null){
+  const p = String(project || '').trim();
+  const r = String(roleName || '').trim();
+  if(!p || !r) return;
+  const map = readProjectDubbingVoiceDesignMap();
+  if(!map[p] || typeof map[p] !== 'object') map[p] = {};
+  if(payload && typeof payload === 'object') map[p][r] = payload;
+  else delete map[p][r];
+  if(map[p] && typeof map[p] === 'object' && !Object.keys(map[p]).length) delete map[p];
+  saveProjectDubbingVoiceDesignMap(map);
+}
+
+function readProjectDubbingVoicePromptLineMap(){
+  try {
+    const raw = localStorage.getItem(PROJECT_DUBBING_VOICE_PROMPT_LINE_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveProjectDubbingVoicePromptLineMap(map = {}){
+  try { localStorage.setItem(PROJECT_DUBBING_VOICE_PROMPT_LINE_KEY, JSON.stringify(map || {})); } catch {}
+}
+
+function getProjectDubbingVoicePromptLine(project = '', roleName = ''){
+  const p = String(project || '').trim();
+  const r = String(roleName || '').trim();
+  if(!p || !r) return '';
+  const map = readProjectDubbingVoicePromptLineMap();
+  const line = map?.[p]?.[r];
+  return String(line || '').trim();
+}
+
+function setProjectDubbingVoicePromptLine(project = '', roleName = '', lineText = ''){
+  const p = String(project || '').trim();
+  const r = String(roleName || '').trim();
+  if(!p || !r) return;
+  const map = readProjectDubbingVoicePromptLineMap();
+  if(!map[p] || typeof map[p] !== 'object') map[p] = {};
+  const next = String(lineText || '').trim();
+  if(next) map[p][r] = next;
+  else delete map[p][r];
+  if(map[p] && typeof map[p] === 'object' && !Object.keys(map[p]).length) delete map[p];
+  saveProjectDubbingVoicePromptLineMap(map);
+}
+
+function inferVoicePresetByName(name = ''){
+  const n = String(name || '').trim();
+  if(!n) return { gender: '中性', age: '青年', tone: '自然叙述', speed: '中速', emotion: '克制' };
+  if(/旁白|解说|画外音/.test(n)) return { gender: '中性', age: '青年', tone: '纪录片旁白', speed: '中速偏慢', emotion: '沉稳' };
+  if(/黑猫记者|记者|主持/.test(n)) return { gender: '女声', age: '青年', tone: '新闻播报', speed: '中速偏快', emotion: '专业克制' };
+  if(/龙虾助手|助手/.test(n)) return { gender: '男声', age: '青年', tone: '理性助手', speed: '中速', emotion: '冷静' };
+  return { gender: '中性', age: '青年', tone: '自然叙述', speed: '中速', emotion: '克制' };
+}
+
+function collectDubbingRoleNames(project = ''){
+  const p = String(project || '').trim();
+  const rows = [...document.querySelectorAll('#tbody tr')];
+  const fromCast = rows.flatMap(tr => {
+    const sid = String(tr.querySelector('.meta')?.textContent || '').trim();
+    if(!sid) return [];
+    return getProjectSegmentCast(p, sid);
+  });
+  const fromProject = (currentProjectCharacters || []).map(ch => String(ch?.name || ch?.id || '').trim()).filter(Boolean);
+  const fromGlobal = (globalCharacterLibrary || []).map(ch => String(ch?.name || ch?.id || '').trim()).filter(Boolean);
+  const fromProfileMap = Object.keys(getProjectDubbingVoiceProfiles(p) || {}).map(s => String(s || '').trim()).filter(Boolean);
+  const fromManual = getProjectDubbingVoiceManualRoles(p);
+  const fromDubbingText = String(q('dubbingResult')?.value || '').match(/\(([^(\)\n]{1,20})\)/g) || [];
+  const fromDubbingNames = fromDubbingText.map(s => s.replace(/[()]/g, '').trim()).filter(Boolean);
+  const excluded = getProjectDubbingVoiceExcludedRoles(p);
+  const uniq = [...new Set([...fromCast, ...fromProject, ...fromGlobal, ...fromProfileMap, ...fromManual, ...fromDubbingNames])].filter(Boolean).filter(n => !excluded.has(n));
+  if(!excluded.has('旁白') && !uniq.includes('旁白')) uniq.push('旁白');
+  return uniq;
+}
+
+function buildVoiceProfileCard(roleName = '', profile = {}){
+  const role = String(roleName || '').trim();
+  const preset = inferVoicePresetByName(role);
+  const cur = {
+    gender: String(profile?.gender || preset.gender || '中性').trim(),
+    age: String(profile?.age || preset.age || '青年').trim(),
+    tone: String(profile?.tone || preset.tone || '自然叙述').trim(),
+    speed: String(profile?.speed || preset.speed || '中速').trim(),
+    emotion: String(profile?.emotion || preset.emotion || '克制').trim(),
+  };
+  return `
+    <div class="voice-card" data-role-name="${escapeHtml(role)}" style="border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:12px;background:rgba(15,23,42,.44);">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div style="font-size:14px;font-weight:700;color:#e2e8f0;">${escapeHtml(role)}</div>
+        <button type="button" class="btn-ghost" style="padding:4px 10px;font-size:12px;" onclick="resetOneDubbingVoiceProfile('${escapeHtml(role)}')">恢复默认</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:10px;">
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#94a3b8;">性别
+          <input data-field="gender" value="${escapeHtml(cur.gender)}" placeholder="女声/男声/中性" oninput="onDubbingVoiceFieldInput('${escapeHtml(role)}', this)" style="border-radius:8px;border:1px solid rgba(255,255,255,.16);background:rgba(2,6,23,.56);color:#f8fafc;padding:7px 8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#94a3b8;">年龄感
+          <input data-field="age" value="${escapeHtml(cur.age)}" placeholder="青年/中年" oninput="onDubbingVoiceFieldInput('${escapeHtml(role)}', this)" style="border-radius:8px;border:1px solid rgba(255,255,255,.16);background:rgba(2,6,23,.56);color:#f8fafc;padding:7px 8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#94a3b8;">音色风格
+          <input data-field="tone" value="${escapeHtml(cur.tone)}" placeholder="新闻播报/纪录片旁白" oninput="onDubbingVoiceFieldInput('${escapeHtml(role)}', this)" style="border-radius:8px;border:1px solid rgba(255,255,255,.16);background:rgba(2,6,23,.56);color:#f8fafc;padding:7px 8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#94a3b8;">语速
+          <input data-field="speed" value="${escapeHtml(cur.speed)}" placeholder="中速偏快" oninput="onDubbingVoiceFieldInput('${escapeHtml(role)}', this)" style="border-radius:8px;border:1px solid rgba(255,255,255,.16);background:rgba(2,6,23,.56);color:#f8fafc;padding:7px 8px;" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#94a3b8;">情绪底色
+          <input data-field="emotion" value="${escapeHtml(cur.emotion)}" placeholder="冷静/紧绷/温暖" oninput="onDubbingVoiceFieldInput('${escapeHtml(role)}', this)" style="border-radius:8px;border:1px solid rgba(255,255,255,.16);background:rgba(2,6,23,.56);color:#f8fafc;padding:7px 8px;" />
+        </label>
+      </div>
+    </div>
+  `;
+}
+
+function renderDubbingVoiceProfiles(){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  const grid = q('dubbingVoiceGrid');
+  const meta = q('dubbingVoiceMeta');
+  if(!grid) return;
+  if(!project){
+    grid.innerHTML = '<div class="meta">请先在剧本页选择并加载项目。</div>';
+    if(meta) meta.textContent = '未选择项目';
+    return;
+  }
+
+  const names = collectDubbingRoleNames(project);
+  const profileMap = getProjectDubbingVoiceProfiles(project);
+  if(!names.length){
+    grid.innerHTML = '<div class="meta">未识别到角色，直接在上方输入“角色名：提示词”即可创建。</div>';
+    if(meta) meta.textContent = `项目：${project} · 0 个角色`;
+    return;
+  }
+
+  const rows = names.map((name, i) => {
+    const p = profileMap[name] || inferVoicePresetByName(name);
+    const storedLine = getProjectDubbingVoicePromptLine(project, name);
+    const line = storedLine || buildVoiceProfilePromptLine(name, p);
+    const design = getProjectDubbingVoiceDesign(project, name);
+    const designed = !!String(design?.voiceId || design?.voice || '').trim();
+    const updatedAt = String(design?.updatedAt || '').trim();
+    const updateText = updatedAt ? ` · ${new Date(updatedAt).toLocaleString()}` : '';
+    const badge = designed ? `已设计${updateText}` : '未设计';
+    return `
+      <div style="display:flex;flex-direction:column;gap:6px;padding:8px 0;border-bottom:1px dashed rgba(255,255,255,.12);">
+        <div style="display:flex;gap:8px;align-items:center;">
+          <div class="meta" style="width:28px;flex:0 0 28px;text-align:right;">${i+1}.</div>
+          <div style="width:88px;flex:0 0 88px;font-size:13px;color:#cbd5e1;font-weight:600;">${escapeHtml(name)}</div>
+          <input data-role="${escapeHtml(name)}" value="${escapeHtml(line)}" oninput="onDubbingVoicePromptLineInput(this)" placeholder="角色：音色描述" style="flex:1;min-width:220px;border-radius:8px;border:1px solid rgba(255,255,255,.16);background:rgba(2,6,23,.56);color:#f8fafc;padding:7px 8px;" />
+          <button type="button" class="btn-ghost" style="padding:4px 10px;font-size:12px;" onclick="designDubbingVoiceForRole('${escapeHtml(name)}', this)">设计音色</button>
+          <button type="button" class="btn-ghost" style="padding:4px 10px;font-size:12px;" onclick="previewDubbingVoiceForRole('${escapeHtml(name)}', this)">试听</button>
+          <button type="button" class="btn-ghost" style="padding:4px 10px;font-size:12px;" onclick="removeDubbingVoiceRole('${escapeHtml(name)}')">删除</button>
+        </div>
+        <div class="meta" style="margin-left:124px;">${badge}</div>
+      </div>
+    `;
+  }).join('');
+
+  grid.innerHTML = `<div style="border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:6px 12px;background:rgba(2,6,23,.22);">${rows}</div>`;
+  if(meta) meta.textContent = `项目：${project} · 已生成 ${names.length} 个角色音色（提示词单行可改）`;
+}
+
+function onDubbingVoiceFieldInput(roleName = '', inputEl = null){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  const role = String(roleName || '').trim();
+  const field = String(inputEl?.getAttribute('data-field') || '').trim();
+  if(!project || !role || !field) return;
+
+  const map = getProjectDubbingVoiceProfiles(project);
+  const old = map[role] && typeof map[role] === 'object' ? map[role] : inferVoicePresetByName(role);
+  const next = {
+    gender: String(old.gender || '').trim(),
+    age: String(old.age || '').trim(),
+    tone: String(old.tone || '').trim(),
+    speed: String(old.speed || '').trim(),
+    emotion: String(old.emotion || '').trim(),
+  };
+  next[field] = String(inputEl?.value || '').trim();
+  setProjectRoleVoiceProfile(project, role, next);
+}
+
+function onDubbingVoicePromptLineInput(inputEl = null){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  const role = String(inputEl?.getAttribute('data-role') || '').trim();
+  const line = String(inputEl?.value || '').trim();
+  if(!project || !role) return;
+  addProjectDubbingVoiceManualRole(project, role);
+  setProjectDubbingVoiceRoleExcluded(project, role, false);
+  setProjectDubbingVoicePromptLine(project, role, line);
+  if(!line) return;
+  const body = line.includes('：') || line.includes(':') ? line.replace(/^([^：:]{1,24})[：:]/, '').trim() : line;
+  const profile = parseVoicePromptToProfile(body, role);
+  setProjectRoleVoiceProfile(project, role, profile);
+}
+
+function addDubbingVoiceRole(){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  if(!project){ setStatus('请先选择项目', false); return; }
+  const inputEl = q('dubbingVoiceRoleNameInput');
+  const role = String(inputEl?.value || '').trim();
+  if(!role){ setStatus('请先输入角色名', false); return; }
+  addProjectDubbingVoiceManualRole(project, role);
+  setProjectDubbingVoiceRoleExcluded(project, role, false);
+  const existing = getProjectDubbingVoiceProfiles(project)?.[role];
+  if(!existing) setProjectRoleVoiceProfile(project, role, inferVoicePresetByName(role));
+  if(inputEl) inputEl.value = '';
+  renderDubbingVoiceProfiles();
+  setStatus(`已添加角色：${role}`);
+}
+
+function removeDubbingVoiceRole(roleName = ''){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  const role = String(roleName || '').trim();
+  if(!project || !role) return;
+  setProjectDubbingVoiceRoleExcluded(project, role, true);
+  removeProjectDubbingVoiceManualRole(project, role);
+  setProjectRoleVoiceProfile(project, role, null);
+  renderDubbingVoiceProfiles();
+  setStatus(`已删除角色：${role}`);
+}
+
+function resetOneDubbingVoiceProfile(roleName = ''){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  const role = String(roleName || '').trim();
+  if(!project || !role) return;
+  setProjectRoleVoiceProfile(project, role, inferVoicePresetByName(role));
+  renderDubbingVoiceProfiles();
+}
+
+function resetDubbingVoiceProfiles(){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  if(!project){ setStatus('请先选择项目', false); return; }
+  const names = collectDubbingRoleNames(project);
+  names.forEach(name => setProjectRoleVoiceProfile(project, name, inferVoicePresetByName(name)));
+  renderDubbingVoiceProfiles();
+  setStatus(`已重置 ${names.length} 个角色音色`);
+}
+
+function buildVoiceProfilePromptLine(roleName = '', profile = {}){
+  const role = String(roleName || '').trim();
+  if(!role) return '';
+  const p = profile && typeof profile === 'object' ? profile : inferVoicePresetByName(role);
+  const parts = [];
+  const age = String(p?.age || '').trim();
+  if(age) parts.push(`${age}`);
+  const gender = String(p?.gender || '').trim();
+  if(gender) parts.push(`${gender}`);
+  const tone = String(p?.tone || '').trim();
+  if(tone) parts.push(`音色风格偏${tone}`);
+  const speed = String(p?.speed || '').trim();
+  if(speed) parts.push(`语速${speed}`);
+  const emotion = String(p?.emotion || '').trim();
+  if(emotion) parts.push(`情绪底色${emotion}`);
+  return `${role}：${parts.join('，')}`;
+}
+
+function normalizeVoiceFieldValue(field = '', value = ''){
+  const f = String(field || '').trim();
+  const v = String(value || '').trim();
+  if(!v) return '';
+  if(f === 'gender'){
+    if(/女|女生|女性|少女|御姐|甜妹/.test(v)) return '女声';
+    if(/男|男生|男性|少年|大叔/.test(v)) return '男声';
+    if(/中性|不分男女/.test(v)) return '中性';
+  }
+  if(f === 'speed'){
+    if(/很?快|偏快|快一点|快些|急促/.test(v)) return '中速偏快';
+    if(/很?慢|偏慢|慢一点|慢些/.test(v)) return '中速偏慢';
+    if(/中速|适中|正常/.test(v)) return '中速';
+  }
+  return v;
+}
+
+function parseVoicePromptToProfile(text = '', roleName = ''){
+  const raw = String(text || '').replace(/。/g, '，').replace(/[;；]/g, '，');
+  const profile = inferVoicePresetByName(roleName);
+
+  const ageMatch = raw.match(/(\d{1,2})\s*岁/);
+  if(ageMatch){
+    const ageNum = Number(ageMatch[1]);
+    if(Number.isFinite(ageNum)){
+      if(ageNum <= 16) profile.age = `${ageNum}岁（少年）`;
+      else if(ageNum <= 28) profile.age = `${ageNum}岁（青年）`;
+      else if(ageNum <= 45) profile.age = `${ageNum}岁（中年）`;
+      else profile.age = `${ageNum}岁（成熟）`;
+    }
+  } else if(/青年|中年|少年|幼年|老年|成熟/.test(raw)){
+    const m = raw.match(/青年|中年|少年|幼年|老年|成熟/);
+    if(m) profile.age = m[0];
+  }
+
+  if(/女|女生|女性|少女|御姐|甜妹/.test(raw)) profile.gender = '女声';
+  else if(/男|男生|男性|少年音|大叔音/.test(raw)) profile.gender = '男声';
+  else if(/中性|不分男女/.test(raw)) profile.gender = '中性';
+
+  if(/台湾|台妹|台腔/.test(raw)){
+    const currentTone = String(profile.tone || '').trim();
+    profile.tone = currentTone ? `${currentTone}（台湾腔）` : '台湾腔';
+  }
+
+  if(/新闻|播报|主播/.test(raw)) profile.tone = '新闻播报';
+  else if(/纪录片|旁白|解说/.test(raw)) profile.tone = '纪录片旁白';
+  else if(/甜|软萌|少女感/.test(raw)) profile.tone = '甜美少女';
+  else if(/冷|冷峻|克制/.test(raw)) profile.tone = '冷静克制';
+
+  if(/很?快|偏快|快一点|快些|急促/.test(raw)) profile.speed = '中速偏快';
+  else if(/很?慢|偏慢|慢一点|慢些/.test(raw)) profile.speed = '中速偏慢';
+  else if(/中速|适中|正常/.test(raw)) profile.speed = '中速';
+
+  if(/甜|温柔|治愈|亲和/.test(raw)) profile.emotion = '温暖甜美';
+  else if(/专业|克制|理性/.test(raw)) profile.emotion = '专业克制';
+  else if(/紧张|焦虑|压迫|紧绷/.test(raw)) profile.emotion = '紧绷';
+  else if(/冷静|沉稳/.test(raw)) profile.emotion = '冷静沉稳';
+
+  profile.gender = normalizeVoiceFieldValue('gender', profile.gender);
+  profile.speed = normalizeVoiceFieldValue('speed', profile.speed);
+  profile.age = String(profile.age || '').trim() || '青年';
+  profile.tone = String(profile.tone || '').trim() || '自然叙述';
+  profile.emotion = String(profile.emotion || '').trim() || '克制';
+  return profile;
+}
+
+function setDubbingVoiceStatus(text = '', ok = true){
+  const msg = String(text || '').trim();
+  if(!msg) return;
+  try {
+    const el = q('dubbingStatus');
+    if(el){
+      el.textContent = msg;
+      el.className = ok ? 'meta ok' : 'meta err';
+    }
+  } catch {}
+  setStatus(msg, ok);
+}
+
+async function designDubbingVoiceForRole(roleName = '', btn = null){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  const role = String(roleName || '').trim();
+  if(!project){ setDubbingVoiceStatus('请先选择项目', false); return; }
+  if(!role){ setDubbingVoiceStatus('角色名为空，无法设计音色', false); return; }
+
+  const lineInput = document.querySelector(`#dubbingVoiceGrid input[data-role="${CSS.escape(role)}"]`);
+  const lineText = String(lineInput?.value || '').trim();
+  if(!lineText){ setDubbingVoiceStatus(`请先填写 ${role} 的音色描述`, false); return; }
+  const promptText = lineText.includes('：') || lineText.includes(':')
+    ? lineText.replace(/^([^：:]{1,24})[：:]/, '').trim()
+    : lineText;
+
+  const button = btn || null;
+  const oldText = button ? String(button.textContent || '').trim() : '';
+  if(button){
+    button.disabled = true;
+    button.textContent = '设计中...';
+  }
+
+  try {
+    const base = getBridgeBase();
+    const resp = await fetch(`${base}/api/dubbing/voice/design`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project, role, prompt: promptText }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if(!resp.ok || !data?.ok){
+      throw new Error(data?.error || `HTTP ${resp.status}`);
+    }
+
+    const voiceId = String(data?.voiceId || data?.voice || data?.id || '').trim();
+    const designPayload = {
+      voiceId,
+      voice: String(data?.voice || '').trim(),
+      previewText: String(data?.previewText || '').trim(),
+      previewAudioUrl: String(data?.previewAudioUrl || '').trim(),
+      model: String(data?.model || '').trim(),
+      provider: String(data?.provider || '').trim(),
+      ttsModel: String(data?.ttsModel || '').trim(),
+      updatedAt: new Date().toISOString(),
+      lastPrompt: promptText,
+      raw: data,
+    };
+    setProjectDubbingVoiceDesign(project, role, designPayload);
+    renderDubbingVoiceProfiles();
+
+    // 设计成功后自动试听一次（用户要求：点“设计音色”即自动播放）
+    if(dubbingVoicePreviewAudio){
+      try { dubbingVoicePreviewAudio.pause(); } catch {}
+      dubbingVoicePreviewAudio = null;
+    }
+    if(dubbingVoicePreviewUtterance && window.speechSynthesis){
+      try { window.speechSynthesis.cancel(); } catch {}
+      dubbingVoicePreviewUtterance = null;
+    }
+
+    const autoPreviewAudioUrl = String(data?.previewAudioUrl || '').trim();
+    const autoPreviewText = String(data?.previewText || `${role}，您好，这是一段音色试听。`).trim();
+    let autoPlayed = false;
+    if(autoPreviewAudioUrl){
+      dubbingVoicePreviewAudio = new Audio(autoPreviewAudioUrl);
+      await dubbingVoicePreviewAudio.play().catch(() => {});
+      autoPlayed = true;
+    }else if(window.speechSynthesis && window.SpeechSynthesisUtterance){
+      const utter = new SpeechSynthesisUtterance(autoPreviewText);
+      utter.lang = 'zh-CN';
+      utter.rate = 1.05;
+      dubbingVoicePreviewUtterance = utter;
+      window.speechSynthesis.speak(utter);
+      autoPlayed = true;
+    }
+
+    setDubbingVoiceStatus(`${role} 音色设计完成${voiceId ? `（${voiceId}）` : ''}${autoPlayed ? '，已自动试听' : ''}`);
+  } catch (err) {
+    setDubbingVoiceStatus(`音色设计失败（${role}）：${err?.message || err}`, false);
+  } finally {
+    if(button){
+      button.disabled = false;
+      button.textContent = oldText || '设计音色';
+    }
+  }
+}
+
+async function previewDubbingVoiceForRole(roleName = '', btn = null){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  const role = String(roleName || '').trim();
+  if(!project){ setDubbingVoiceStatus('请先选择项目', false); return; }
+  if(!role){ setDubbingVoiceStatus('角色名为空，无法试听', false); return; }
+
+  const design = getProjectDubbingVoiceDesign(project, role) || {};
+  const voiceId = String(design?.voiceId || design?.voice || '').trim();
+  if(!voiceId){
+    setDubbingVoiceStatus(`请先为 ${role} 设计音色`, false);
+    return;
+  }
+
+  const button = btn || null;
+  const oldText = button ? String(button.textContent || '').trim() : '';
+  if(button){
+    button.disabled = true;
+    button.textContent = '试听中...';
+  }
+
+  try {
+    // 上方“试听”优先播放刚刚设计成功返回的 preview 音频，避免无意义再请求导致 422
+    const localDesignedPreviewAudio = String(design?.previewAudioUrl || '').trim();
+    const localDesignedPreviewText = String(design?.previewText || `${role}，您好，这是一段音色试听。`).trim();
+    if(localDesignedPreviewAudio){
+      if(dubbingVoicePreviewAudio){
+        try { dubbingVoicePreviewAudio.pause(); } catch {}
+        dubbingVoicePreviewAudio = null;
+      }
+      if(dubbingVoicePreviewUtterance && window.speechSynthesis){
+        try { window.speechSynthesis.cancel(); } catch {}
+        dubbingVoicePreviewUtterance = null;
+      }
+      dubbingVoicePreviewAudio = new Audio(localDesignedPreviewAudio);
+      await dubbingVoicePreviewAudio.play().catch(() => {});
+      setDubbingVoiceStatus(`正在试听 ${role} 的音色（复用已设计音频）`);
+      renderDubbingVoiceProfiles();
+      return;
+    }
+
+    const base = getBridgeBase();
+    const resp = await fetch(`${base}/api/dubbing/voice/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project,
+        role,
+        voiceId,
+        text: localDesignedPreviewText,
+        reuseDesignedPreview: true,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if(!resp.ok || !data?.ok){
+      throw new Error(data?.error || `HTTP ${resp.status}`);
+    }
+    const audioUrl = String(data?.audioUrl || data?.url || '').trim();
+    const previewText = String(data?.previewText || design?.previewText || `${role}，您好，这是一段音色试听。`).trim();
+    const provider = String(data?.provider || data?.model || design?.model || '').trim().toLowerCase();
+    const useBrowserTTS = !audioUrl;
+
+    setProjectDubbingVoiceDesign(project, role, {
+      ...design,
+      voiceId,
+      previewAudioUrl: audioUrl,
+      previewText,
+      updatedAt: new Date().toISOString(),
+    });
+
+    if(dubbingVoicePreviewAudio){
+      try { dubbingVoicePreviewAudio.pause(); } catch {}
+      dubbingVoicePreviewAudio = null;
+    }
+    if(dubbingVoicePreviewUtterance && window.speechSynthesis){
+      try { window.speechSynthesis.cancel(); } catch {}
+      dubbingVoicePreviewUtterance = null;
+    }
+
+    if(useBrowserTTS && window.speechSynthesis){
+      const utter = new SpeechSynthesisUtterance(previewText || `${role}，您好，这是一段音色试听。`);
+      utter.lang = 'zh-CN';
+      utter.rate = 1.05;
+      dubbingVoicePreviewUtterance = utter;
+      window.speechSynthesis.speak(utter);
+      setDubbingVoiceStatus(`正在试听 ${role} 的音色（浏览器预览）`);
+    }else{
+      if(!audioUrl) throw new Error('后端未返回可播放音频地址');
+      dubbingVoicePreviewAudio = new Audio(audioUrl);
+      await dubbingVoicePreviewAudio.play().catch(() => {});
+      setDubbingVoiceStatus(`正在试听 ${role} 的音色`);
+    }
+
+    renderDubbingVoiceProfiles();
+  } catch (err) {
+    setDubbingVoiceStatus(`试听失败（${role}）：${err?.message || err}`, false);
+  } finally {
+    if(button){
+      button.disabled = false;
+      button.textContent = oldText || '试听';
+    }
+  }
+}
+
+function applyDubbingVoicePrompt(){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  if(!project){ setStatus('请先选择项目', false); return; }
+  const inputEl = q('dubbingVoicePromptInput');
+  const raw = String(inputEl?.value || '').trim();
+  if(!raw){ setStatus('请先输入音色提示词', false); return; }
+
+  const lines = raw.split(/\n+/).map(s => s.trim()).filter(Boolean);
+  if(!lines.length){ setStatus('提示词为空', false); return; }
+
+  let hit = 0;
+  let genericApplied = 0;
+  const roleNames = collectDubbingRoleNames(project);
+
+  lines.forEach(line => {
+    const m = line.match(/^([^：:]{1,24})[：:](.+)$/);
+    if(m){
+      const role = String(m[1] || '').trim();
+      const prompt = String(m[2] || '').trim();
+      if(!role || !prompt) return;
+      const profile = parseVoicePromptToProfile(prompt, role);
+      setProjectRoleVoiceProfile(project, role, profile);
+      hit += 1;
+      return;
+    }
+
+    if(!roleNames.length) return;
+    roleNames.forEach(role => {
+      const profile = parseVoicePromptToProfile(line, role);
+      setProjectRoleVoiceProfile(project, role, profile);
+      genericApplied += 1;
+    });
+  });
+
+  if(!hit && !genericApplied){
+    setStatus('未识别到有效提示词，请按“角色名：描述”逐行输入，或输入一行通用描述', false);
+    return;
+  }
+
+  renderDubbingVoiceProfiles();
+  setStatus(`已一键设置音色：角色定向 ${hit} 条，通用覆盖 ${genericApplied} 个角色`);
+}
+
+async function copyDubbingVoiceProfiles(){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  if(!project){ setStatus('请先选择项目', false); return; }
+  const names = collectDubbingRoleNames(project);
+  const map = getProjectDubbingVoiceProfiles(project);
+  const lines = [
+    `项目：${project}`,
+    '音色设计：',
+    ...names.map((name, i) => {
+      const p = map[name] || inferVoicePresetByName(name);
+      const promptLike = buildVoiceProfilePromptLine(name, p);
+      return `${i+1}. ${promptLike || `${name}：性别${p.gender || '-'}，年龄感${p.age || '-'}，音色${p.tone || '-'}，语速${p.speed || '-'}，情绪${p.emotion || '-'}`}`;
+    })
+  ];
+  const text = lines.join('\n');
+  try {
+    if(navigator?.clipboard?.writeText){
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    setStatus('已复制音色设定');
+  } catch (err) {
+    setStatus(`复制音色设定失败：${err?.message || err}`, false);
+  }
+}
+
+function persistProjectDubbingDraftFromUi(){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  if(!project) return;
+  const outputEl = q('dubbingResult');
+  const text = String(outputEl?.value || '').trim();
+  setProjectDubbingResultDraft(project, text);
+}
+
+function restoreProjectDubbingDraftToUi(force = false){
+  const project = String(latestOutlineProject || currentProjectName || getProject() || '').trim();
+  if(!project) return;
+  const outputEl = q('dubbingResult');
+  if(!outputEl) return;
+  const current = String(outputEl.value || '').trim();
+  const saved = getProjectDubbingResultDraft(project);
+
+  if(force){
+    outputEl.value = saved || '';
+    const statusEl = q('dubbingStatus');
+    if(statusEl){
+      statusEl.textContent = saved
+        ? '已恢复本项目上次保存的配音稿草稿'
+        : '等待分析（将直接使用左侧剧本内容）';
+    }
+    if(typeof renderDubbingListEditorFromText === 'function') renderDubbingListEditorFromText(outputEl.value || '');
+    return;
+  }
+
+  if(!current && saved){
+    outputEl.value = saved;
+    const statusEl = q('dubbingStatus');
+    if(statusEl) statusEl.textContent = '已恢复本项目上次保存的配音稿草稿';
+  }
+  if(typeof renderDubbingListEditorFromText === 'function') renderDubbingListEditorFromText(outputEl.value || '');
+}
+
+async function oneClickAnalyzeScriptForDubbing(){
+  const project = latestOutlineProject || currentProjectName || getProject();
+  const btn = q('analyzeDubbingBtn');
+  const statusEl = q('dubbingStatus');
+  const outputEl = q('dubbingResult');
+  const segments = collectSegmentsForDubbing();
+
+  if(!segments.length){
+    if(statusEl) statusEl.textContent = '未找到可分析的剧本内容，请先加载项目并生成分镜';
+    setStatus('配音分析失败：没有可用分镜', false);
+    return;
+  }
+
+  if(btn) btn.disabled = true;
+  if(statusEl) statusEl.textContent = `正在分析 ${segments.length} 段剧本…`;
+
+  try {
+    let result = '';
+    if(typeof requestChatCompletion === 'function'){
+      const brief = segments.map(s => ({ sid: s.sid, script: s.script })).slice(0, 120);
+      const prompt = [
+        '你是影视配音编剧助手。',
+        '请把给定剧本片段改写为可直接配音的“角色对话稿”。',
+        '硬性要求：',
+        '1) 每句都用“A/B/C...”作为说话人前缀，可附角色名，例如 A(张三)。',
+        '2) 每句必须包含语气，例如：生气地说、疑惑地说、平静地说、兴奋地说。',
+        '3) 输出格式严格为：A(角色)语气地说：台词',
+        '4) 保持剧情语义，不要胡编新剧情，不要输出解释。',
+        '5) 若出现“黑猫记者/龙虾助手”，必须保持该角色设定，不得改成其他人名。',
+        '6) 必须基于左侧剧本/分镜当前内容生成，禁止混入历史项目角色与剧情。',
+        '7) 禁止输出“苏甜”“赫连城”；如必须指代对应人物，请使用“黑猫记者”“龙虾助手”。',
+        `项目：${project || '未命名项目'}`,
+        `片段数据：${JSON.stringify(brief)}`
+      ].join('\n');
+
+      const reply = await requestChatCompletion(prompt, {
+        preferredModel: 'custom-154-12-46-107/gpt-5.3-codex',
+        fallbackModel: 'custom-154-12-46-107/gpt-5.4',
+        temperature: 0.4,
+      });
+      result = sanitizeDubbingOutput(String(reply || '').trim());
+    }
+
+    if(!result){
+      result = formatDubbingByRule(project, segments);
+    }
+
+    result = sanitizeDubbingOutput(result);
+    if(outputEl) outputEl.value = result || '';
+    persistProjectDubbingDraftFromUi();
+    if(statusEl) statusEl.textContent = `分析完成：已生成 ${segments.length} 段配音稿（已保存草稿）`;
+    setStatus('配音稿生成完成（已保存草稿）');
+  } catch (err) {
+    const fallback = sanitizeDubbingOutput(formatDubbingByRule(project, segments));
+    if(outputEl) outputEl.value = fallback || '';
+    persistProjectDubbingDraftFromUi();
+    if(statusEl) statusEl.textContent = `分析接口异常，已使用本地规则生成并保存草稿：${err?.message || err}`;
+    setStatus(`配音分析异常，已回退本地生成并保存草稿：${err?.message || err}`, false);
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function copyDubbingResult(){
+  const text = String(q('dubbingResult')?.value || '').trim();
+  const statusEl = q('dubbingStatus');
+  if(!text){
+    if(statusEl) statusEl.textContent = '暂无可复制内容';
+    setStatus('复制失败：配音稿为空', false);
+    return;
+  }
+
+  try {
+    if(navigator?.clipboard?.writeText){
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = q('dubbingResult');
+      if(ta){
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+      }
+    }
+    if(statusEl) statusEl.textContent = '已复制配音稿到剪贴板';
+    setStatus('已复制配音稿');
+  } catch (err) {
+    if(statusEl) statusEl.textContent = `复制失败：${err?.message || err}`;
+    setStatus(`复制失败：${err?.message || err}`, false);
+  }
+}
+
 function toggleOutlinePanel(show = true){
   const panel = q('outlinePanelWrap');
   const other = q('characterPanelWrap');
@@ -2530,6 +4127,17 @@ document.addEventListener('keydown', (e)=>{
     });
   }
 
+  const dubbingBox = q('dubbingResult');
+  if(dubbingBox){
+    const persistDubbingDraft = ()=>{ persistProjectDubbingDraftFromUi(); };
+    dubbingBox.addEventListener('input', persistDubbingDraft);
+    dubbingBox.addEventListener('change', persistDubbingDraft);
+    window.addEventListener('beforeunload', persistDubbingDraft);
+  }
+  if(typeof renderDubbingListEditorFromText === 'function'){
+    renderDubbingListEditorFromText(String(dubbingBox?.value || ''));
+  }
+
   discoverProjects().then(()=>{
     const fromQuery = new URL(window.location.href).searchParams.get('project');
     const pick = fromQuery || q('projectSelect').value || 'episode-1-20260320-113900';
@@ -2538,7 +4146,7 @@ document.addEventListener('keydown', (e)=>{
   });
 })();
 
-let videoGenModalCtx = { project: '', sid: '', button: null, sceneImageUrl: '' };
+let videoGenModalCtx = { project: '', sid: '', button: null, sceneImageUrl: '', tailImageDataUrl: '', tailImageName: '' };
 
 function readVideoGenOptions(){
   try {
@@ -2550,6 +4158,120 @@ function readVideoGenOptions(){
 
 function writeVideoGenOptions(opts = {}){
   try { localStorage.setItem(VIDEO_GEN_OPTIONS_KEY, JSON.stringify(opts || {})); } catch {}
+}
+
+function readVideoGenTailImageDraftMap(){
+  try {
+    const raw = localStorage.getItem(VIDEO_GEN_TAIL_IMAGE_DRAFT_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch { return {}; }
+}
+
+function writeVideoGenTailImageDraftMap(map = {}){
+  try { localStorage.setItem(VIDEO_GEN_TAIL_IMAGE_DRAFT_KEY, JSON.stringify(map || {})); } catch {}
+}
+
+function getVideoGenTailDraft(project = '', sid = ''){
+  const p = String(project || '').trim();
+  const s = String(sid || '').trim();
+  if(!p || !s) return null;
+  const map = readVideoGenTailImageDraftMap();
+  const row = map?.[p]?.[s];
+  if(!row || typeof row !== 'object') return null;
+  const dataUrl = String(row.dataUrl || '').trim();
+  if(!/^data:image\//i.test(dataUrl)) return null;
+  return {
+    dataUrl,
+    name: String(row.name || '').trim(),
+    updatedAt: String(row.updatedAt || '').trim(),
+  };
+}
+
+function setVideoGenTailDraft(project = '', sid = '', dataUrl = '', name = ''){
+  const p = String(project || '').trim();
+  const s = String(sid || '').trim();
+  if(!p || !s) return;
+  const map = readVideoGenTailImageDraftMap();
+  if(!map[p] || typeof map[p] !== 'object') map[p] = {};
+  const clean = String(dataUrl || '').trim();
+  if(!clean){
+    if(map[p]){
+      delete map[p][s];
+      if(Object.keys(map[p]).length === 0) delete map[p];
+    }
+    writeVideoGenTailImageDraftMap(map);
+    return;
+  }
+  map[p][s] = {
+    dataUrl: clean,
+    name: String(name || '').trim(),
+    updatedAt: new Date().toISOString(),
+  };
+  writeVideoGenTailImageDraftMap(map);
+}
+
+function renderVideoGenTailImagePreview(){
+  const box = q('videoGenTailImageBox');
+  const hint = q('videoGenTailHint');
+  const clearBtn = q('videoGenTailClearBtn');
+  const dataUrl = String(videoGenModalCtx?.tailImageDataUrl || '').trim();
+  const name = String(videoGenModalCtx?.tailImageName || '').trim();
+
+  if(box){
+    if(dataUrl){
+      box.innerHTML = `<img src="${escapeHtml(dataUrl)}" alt="尾帧图" loading="lazy" />`;
+    } else {
+      box.innerHTML = '<div class="video-gen-empty">未上传尾帧图（可选）</div>';
+    }
+  }
+  if(hint){
+    hint.textContent = dataUrl
+      ? `尾帧图已就绪：${name || '已选择图片'}（将作为 reference_images 的第2张）`
+      : '不上传则仅使用首帧图（或纯文生视频）。';
+  }
+  if(clearBtn) clearBtn.disabled = !dataUrl;
+}
+
+async function onVideoGenTailFileChange(input){
+  const file = input?.files?.[0];
+  if(!file) return;
+  const maxBytes = 5 * 1024 * 1024;
+  if(file.size > maxBytes){
+    setStatus('尾帧图不能超过 5MB', false);
+    input.value = '';
+    return;
+  }
+  if(!/^image\//i.test(String(file.type || ''))){
+    setStatus('尾帧图仅支持图片格式', false);
+    input.value = '';
+    return;
+  }
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  }).catch(err => {
+    setStatus(`读取尾帧图失败：${err?.message || err}`, false);
+    return '';
+  });
+
+  if(!dataUrl) return;
+  videoGenModalCtx.tailImageDataUrl = dataUrl;
+  videoGenModalCtx.tailImageName = String(file.name || '').trim();
+  setVideoGenTailDraft(videoGenModalCtx.project, videoGenModalCtx.sid, dataUrl, file.name || '');
+  renderVideoGenTailImagePreview();
+  input.value = '';
+}
+
+function clearVideoGenTailImage(){
+  videoGenModalCtx.tailImageDataUrl = '';
+  videoGenModalCtx.tailImageName = '';
+  setVideoGenTailDraft(videoGenModalCtx.project, videoGenModalCtx.sid, '', '');
+  renderVideoGenTailImagePreview();
+  const input = q('videoGenTailFile');
+  if(input) input.value = '';
 }
 
 function getAllowedVideoDurations(model = ''){
@@ -2610,6 +4332,58 @@ function readProjectVideoDraftMap(){
   } catch { return {}; }
 }
 
+function readProjectVideoPromptDraftMap(){
+  try {
+    const raw = localStorage.getItem(PROJECT_VIDEO_PROMPT_DRAFT_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch { return {}; }
+}
+
+function readProjectVideoHistoryDeletedMap(){
+  try {
+    const raw = localStorage.getItem(PROJECT_VIDEO_HISTORY_DELETED_KEY);
+    const data = raw ? JSON.parse(raw) : {};
+    return data && typeof data === 'object' ? data : {};
+  } catch { return {}; }
+}
+
+function saveProjectVideoHistoryDeletedMap(map = {}){
+  try { localStorage.setItem(PROJECT_VIDEO_HISTORY_DELETED_KEY, JSON.stringify(map || {})); } catch {}
+}
+
+function buildVideoHistoryDeleteKey(record = {}){
+  const taskId = String(record?.taskId || '').trim();
+  const url = String(record?.videoUrl || record?.remoteVideoUrl || record?.hdVideoUrl || record?.mediaUrl || '').trim();
+  const createdAt = String(record?.createdAt || '').trim();
+  const variant = String(record?.variant || '').trim();
+  return [taskId, url, createdAt, variant].join('|');
+}
+
+function markProjectVideoHistoryDeleted(project = '', sid = '', record = null){
+  const p = String(project || '').trim();
+  const s = String(sid || '').trim();
+  if(!p || !s || !record || typeof record !== 'object') return;
+  const key = buildVideoHistoryDeleteKey(record);
+  if(!key || key === '|||') return;
+  const map = readProjectVideoHistoryDeletedMap();
+  if(!map[p] || typeof map[p] !== 'object') map[p] = {};
+  if(!Array.isArray(map[p][s])) map[p][s] = [];
+  if(!map[p][s].includes(key)) map[p][s].push(key);
+  saveProjectVideoHistoryDeletedMap(map);
+}
+
+function isProjectVideoHistoryDeleted(project = '', sid = '', record = null){
+  const p = String(project || '').trim();
+  const s = String(sid || '').trim();
+  if(!p || !s || !record || typeof record !== 'object') return false;
+  const key = buildVideoHistoryDeleteKey(record);
+  if(!key || key === '|||') return false;
+  const map = readProjectVideoHistoryDeletedMap();
+  const rows = Array.isArray(map?.[p]?.[s]) ? map[p][s] : [];
+  return rows.includes(key);
+}
+
 function setProjectVideoDraft(project = '', sid = '', record = null){
   const p = String(project || '').trim();
   const s = String(sid || '').trim();
@@ -2620,12 +4394,159 @@ function setProjectVideoDraft(project = '', sid = '', record = null){
   try { localStorage.setItem(PROJECT_VIDEO_DRAFT_KEY, JSON.stringify(map)); } catch {}
 }
 
+function setProjectVideoPromptDraft(project = '', sid = '', text = ''){
+  const p = String(project || '').trim();
+  const s = String(sid || '').trim();
+  if(!p || !s) return;
+  const map = readProjectVideoPromptDraftMap();
+  if(!map[p] || typeof map[p] !== 'object') map[p] = {};
+  map[p][s] = String(text || '').trim();
+  try { localStorage.setItem(PROJECT_VIDEO_PROMPT_DRAFT_KEY, JSON.stringify(map)); } catch {}
+}
+
 function getProjectVideoDraft(project = '', sid = ''){
   const p = String(project || '').trim();
   const s = String(sid || '').trim();
   if(!p || !s) return null;
   const map = readProjectVideoDraftMap();
   return map[p] && map[p][s] ? map[p][s] : null;
+}
+
+function getProjectVideoPromptDraftMap(project = ''){
+  const p = String(project || '').trim();
+  if(!p) return {};
+  const map = readProjectVideoPromptDraftMap();
+  const row = map[p];
+  return row && typeof row === 'object' ? row : {};
+}
+
+function persistVideoPromptsByRows(project = '', rows = []){
+  const p = String(project || '').trim();
+  if(!p) return;
+  rows.forEach((it) => {
+    const sid = String(it?.sid || '').trim();
+    if(!sid) return;
+    const text = String(it?.promptTextarea?.value || '');
+    setProjectVideoPromptDraft(p, sid, text);
+  });
+}
+
+function collectStoryboardRowsForVideoPromptGen(){
+  const rows = [...document.querySelectorAll('#tbody tr')];
+  return rows.map((tr, idx) => {
+    const sid = String(tr.querySelector('td:nth-child(2) .meta')?.textContent || '').trim();
+    const script = String(tr.querySelector('td:nth-child(2) textarea')?.value || '').trim();
+    const cast = String(tr.querySelector('td:nth-child(3) .cast-list')?.textContent || '').trim();
+    const promptTextarea = tr.querySelector('td:nth-child(6) textarea');
+    return { idx, sid, script, cast, promptTextarea };
+  }).filter(it => it.sid && it.promptTextarea);
+}
+
+function bindManualVideoPromptDraftEvents(project = ''){
+  const p = String(project || '').trim();
+  if(!p) return;
+  const areas = [...document.querySelectorAll('#tbody textarea.video-prompt-input[data-sid]')];
+  areas.forEach(area => {
+    const sid = String(area.getAttribute('data-sid') || '').trim();
+    if(!sid) return;
+    const saveNow = () => persistVideoPromptsByRows(p, [{ sid, promptTextarea: area }]);
+    area.addEventListener('input', saveNow);
+    area.addEventListener('change', saveNow);
+    area.addEventListener('blur', saveNow);
+  });
+}
+
+function setBatchVideoPromptButtonState(running = false, text = ''){
+  const btn = q('batchVideoPromptBtn');
+  if(!btn) return;
+  btn.disabled = !!running;
+  btn.textContent = text || (running ? '正在依次生成中…' : '一键生成全部视频提示词');
+}
+
+let videoPromptTaskRunning = false;
+
+async function generateAllVideoPrompts(){
+  if(videoPromptTaskRunning){
+    setStatus('正在生成视频提示词，请等待当前任务完成', false);
+    return;
+  }
+  if(typeof requestChatCompletion !== 'function'){
+    setStatus('生成失败：聊天能力未就绪（requestChatCompletion 缺失）', false);
+    return;
+  }
+
+  const rows = collectStoryboardRowsForVideoPromptGen();
+  if(!rows.length){
+    setStatus('未找到可生成的视频提示词行', false);
+    return;
+  }
+
+  const project = String(currentProjectName || latestOutlineProject || getProject() || '未命名项目').trim();
+  const total = rows.length;
+  let ok = 0;
+  let fail = 0;
+
+  try {
+    videoPromptTaskRunning = true;
+    setBatchVideoPromptButtonState(true, `正在依次生成中… 0/${total}`);
+    setStatus(`开始依次生成视频提示词：0/${total}`);
+    if(typeof setChatStatus === 'function') setChatStatus(`正在依次生成视频提示词（0/${total}）...`);
+
+    for(let i = 0; i < total; i++){
+      const row = rows[i];
+      const existingPrompt = String(row.promptTextarea?.value || '').trim();
+      const duration = String((latestRenderContext?.segments || []).find(seg => String(seg.segmentId || seg.id || '').trim() === row.sid)?.durationSec || 8).trim();
+      const styleRule = (typeof VIDEO_STYLE_RULE === 'string' && VIDEO_STYLE_RULE.trim())
+        ? VIDEO_STYLE_RULE.trim()
+        : '9:16 竖版，meme漫画风，角色与场景保持统一。';
+
+      const taskPrompt = [
+        '你是短视频分镜的视频提示词助手。',
+        '请根据给定剧情段，输出一条可直接用于视频生成模型的中文提示词。',
+        '硬性要求：',
+        '1) 必须是9:16竖版。',
+        '2) 严格遵循当前段script，不可改剧情。',
+        '3) 必须体现：人物动作、镜头运动/景别、场景环境、光线氛围、情绪节奏。',
+        '4) 禁止与剧情冲突、禁止空泛词堆砌。',
+        '5) 只返回提示词正文，不要解释，不要代码块。',
+        `【项目】${project}`,
+        `【段号】${row.sid}`,
+        `【建议时长】${duration}秒`,
+        `【出场人物】${row.cast || '未标注'}`,
+        `【风格约束】${styleRule}`,
+        `【剧情段script】${row.script}`,
+        existingPrompt ? `【当前草稿（可优化）】${existingPrompt}` : ''
+      ].filter(Boolean).join('\n');
+
+      try {
+        const reply = await requestChatCompletion(taskPrompt, {
+          preferredModel: 'custom-154-12-46-107/gpt-5.3-codex',
+          fallbackModel: 'custom-154-12-46-107/gpt-5.4',
+          temperature: 0.4,
+        });
+        const prompt = parsePromptTextFromReply(reply);
+        if(!prompt) throw new Error('AI 返回空提示词');
+        row.promptTextarea.value = prompt;
+        ok += 1;
+      } catch (err) {
+        fail += 1;
+        row.promptTextarea.value = ensureVideoStyle(`8秒短视频，9:16，严格遵循剧情段：${row.script}。人物动作自然，镜头连贯，氛围匹配剧情。`);
+      }
+
+      persistVideoPromptsByRows(project, [row]);
+      const done = i + 1;
+      setBatchVideoPromptButtonState(true, `正在依次生成中… ${done}/${total}`);
+      setStatus(`正在依次生成视频提示词：${done}/${total}（已即时保存）`);
+      if(typeof setChatStatus === 'function') setChatStatus(`视频提示词生成进度：${done}/${total}（已即时保存）`);
+    }
+
+    const summary = `视频提示词生成完成：成功 ${ok} 条，失败 ${fail} 条，共 ${total} 条。`;
+    setStatus(summary, fail === 0);
+    if(typeof setChatStatus === 'function') setChatStatus(summary, fail === 0);
+  } finally {
+    videoPromptTaskRunning = false;
+    setBatchVideoPromptButtonState(false);
+  }
 }
 
 function getVideoHistoryRecords(project = '', sid = ''){
@@ -2652,7 +4573,7 @@ function getVideoHistoryRecords(project = '', sid = ''){
     if(!dedup.has(key)) dedup.set(key, it);
   });
 
-  return [...dedup.values()].sort((a, b) => {
+  return [...dedup.values()].filter((it) => !isProjectVideoHistoryDeleted(p, s, it)).sort((a, b) => {
     const ta = Date.parse(String(a?.createdAt || '')) || 0;
     const tb = Date.parse(String(b?.createdAt || '')) || 0;
     return tb - ta;
@@ -2663,6 +4584,35 @@ function isLocalVideoAssetUrl(url = ''){
   const u = String(url || '').trim();
   if(!u) return false;
   return /^\.\/generated\//i.test(u) || /^\/generated\//i.test(u);
+}
+
+function removeVideoHistoryRecord(project = '', sid = '', record = null){
+  const p = String(project || '').trim();
+  const s = String(sid || '').trim();
+  if(!p || !s || !record || typeof record !== 'object') return;
+
+  markProjectVideoHistoryDeleted(p, s, record);
+  const targetKey = buildVideoHistoryDeleteKey(record);
+
+  if(latestRenderContext && latestRenderContext.project === p){
+    const vm = latestRenderContext.videoMap || (latestRenderContext.videoMap = {});
+    const row = vm[s] || null;
+    if(row){
+      const variants = Array.isArray(row.variants) ? row.variants.filter((it) => buildVideoHistoryDeleteKey(it) !== targetKey) : [];
+      row.variants = variants;
+      if(row.latest && buildVideoHistoryDeleteKey(row.latest) === targetKey){
+        row.latest = variants[0] || null;
+      }
+      if(!row.latest && variants.length) row.latest = variants[0];
+      vm[s] = row;
+    }
+  }
+
+  const draft = getProjectVideoDraft(p, s);
+  if(draft && buildVideoHistoryDeleteKey(draft) === targetKey){
+    const latest = ((latestRenderContext?.videoMap || {})[s] || {}).latest || null;
+    setProjectVideoDraft(p, s, latest && typeof latest === 'object' ? latest : null);
+  }
 }
 
 async function saveRemoteVideoToLocal({ project = '', sid = '', taskId = '', remoteVideoUrl = '' } = {}){
@@ -2729,9 +4679,12 @@ function renderVideoGenHistory(project = '', sid = ''){
 
     return `
       <div class="history-item" data-task="${escapeHtml(taskId || '')}">
-        <div class="history-item-head">
-          <span style="font-weight:700;font-size:13px;">#${visibleRows.length - idx}</span>
-          <span class="history-tag ${/^failed|error/i.test(prettyState) ? 'failed' : ''}">${escapeHtml(prettyState)} ${variant ? `｜ ${escapeHtml(variant)}` : ''}</span>
+        <div class="history-item-head" style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+            <span style="font-weight:700;font-size:13px;">#${visibleRows.length - idx}</span>
+            <span class="history-tag ${/^failed|error/i.test(prettyState) ? 'failed' : ''}">${escapeHtml(prettyState)} ${variant ? `｜ ${escapeHtml(variant)}` : ''}</span>
+          </div>
+          <button type="button" data-role="delete-video-history" data-idx="${idx}" title="删除这条记录" style="border:1px solid rgba(251,113,133,.45);border-radius:999px;background:linear-gradient(180deg,rgba(38,12,20,.95),rgba(17,7,12,.96));color:#fb7185;width:26px;height:26px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex-shrink:0;box-shadow:0 6px 14px rgba(0,0,0,.4);">✕</button>
         </div>
         <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:8px;">
           <div>
@@ -2748,6 +4701,21 @@ function renderVideoGenHistory(project = '', sid = ''){
   box.querySelectorAll('a.video-link[data-video]').forEach((a) => {
     a.addEventListener('click', () => {
       openVideoBox(a.getAttribute('data-video') || '', a.getAttribute('data-sid') || '');
+    });
+  });
+
+  box.querySelectorAll('button[data-role="delete-video-history"]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = Number(btn.getAttribute('data-idx') || -1);
+      if(!(idx >= 0 && idx < visibleRows.length)) return;
+      const target = visibleRows[idx];
+      if(!target) return;
+      if(!confirm('确认删除这条视频历史吗？（仅从当前项目历史中隐藏，不删除服务器文件）')) return;
+      removeVideoHistoryRecord(project, sid, target);
+      renderVideoGenHistory(project, sid);
+      const statusEl = q('videoGenStatus');
+      if(statusEl) statusEl.textContent = '已删除该条历史记录';
     });
   });
 
@@ -2803,7 +4771,15 @@ function openVideoGenModal(project, sid, button){
   const tds = row ? [...row.querySelectorAll('td')] : [];
   const videoPromptText = row ? String(tds[5]?.querySelector('textarea')?.value || '').trim() : '';
   const sceneImageUrl = (latestRenderContext?.bindingMap || {})[s] || '';
-  videoGenModalCtx = { project: p, sid: s, button: button || null, sceneImageUrl: sceneImageUrl || '' };
+  const tailDraft = getVideoGenTailDraft(p, s);
+  videoGenModalCtx = {
+    project: p,
+    sid: s,
+    button: button || null,
+    sceneImageUrl: sceneImageUrl || '',
+    tailImageDataUrl: String(tailDraft?.dataUrl || '').trim(),
+    tailImageName: String(tailDraft?.name || '').trim(),
+  };
   const previewBox = q('videoGenPreviewImageBox');
   if(previewBox){
     if(sceneImageUrl){
@@ -2825,6 +4801,7 @@ function openVideoGenModal(project, sid, button){
     ? `将使用分镜图作为首帧：${sceneImageUrl}`
     : '当前分段没有分镜图，无法使用首帧';
   q('videoGenUseHead').disabled = !sceneImageUrl;
+  renderVideoGenTailImagePreview();
   q('videoGenPrompt').value = videoPromptText;
   q('videoGenApplyAll').checked = !!opts.applyAll;
   q('videoGenStatus').textContent = '空闲';
@@ -2854,6 +4831,7 @@ async function submitVideoGenModal(){
   const useHead = !!q('videoGenUseHead').checked && !q('videoGenUseHead').disabled;
   const applyAll = !!q('videoGenApplyAll').checked;
   const sceneImageUrl = String((latestRenderContext?.bindingMap || {})[ctx.sid] || ctx.sceneImageUrl || '').trim();
+  const tailImageDataUrl = String(ctx?.tailImageDataUrl || '').trim();
 
   writeVideoGenOptions({ model, size, duration, useHead, applyAll });
 
@@ -2868,6 +4846,7 @@ async function submitVideoGenModal(){
       prompt,
       model, size, duration,
       imageUrl: useHead ? sceneImageUrl : '',
+      imageTailDataUrl: tailImageDataUrl,
     });
 
     const doneMsg = result?.downloadLocalOk === false
@@ -2887,16 +4866,25 @@ async function submitVideoGenModal(){
   }
 }
 
-async function runVideoGenerate({ project, sid, prompt, model, size, duration, imageUrl = '' }){
+async function runVideoGenerate({ project, sid, prompt, model, size, duration, imageUrl = '', imageTailDataUrl = '' }){
   const base = getBridgeBase();
+  const payload = {
+    project,
+    segmentId: sid,
+    prompt,
+    model,
+    size,
+    duration,
+    imageUrl: imageUrl || '',
+  };
+  const tailData = String(imageTailDataUrl || '').trim();
+  if(/^data:image\//i.test(tailData)){
+    payload.imageTailDataUrl = tailData;
+  }
   const resp = await fetch(`${base}/api/video/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      project, segmentId: sid,
-      prompt, model, size, duration,
-      imageUrl: imageUrl || '',
-    }),
+    body: JSON.stringify(payload),
   });
   const data = await resp.json().catch(()=>({}));
   if(!resp.ok || !data?.ok){

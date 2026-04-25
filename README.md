@@ -1,4 +1,4 @@
-# gitskill
+# 10sVideoFlow
 
 这个仓库是一个视频生成与分镜预览的工具集合，包含：
 
@@ -11,7 +11,7 @@
 ## 项目结构
 
 ```text
-gitskill/
+10sVideoFlow/
 ├─ grok-storyboard-preview/      # 分镜预览页 + 本地 bridge
 ├─ video-generation-pic2api/     # Pic2API 视频生成脚本
 ├─ linggan-video-tools/          # 灵感视频工具与输出
@@ -81,3 +81,6 @@ gitskill/
 
 - 本仓库偏向本地开发、预览与内容生产流程，不是线上生产部署模板。
 - 如需扩展能力，优先在各子目录的 `README.md` / `SKILL.md` 中补充。
+
+
+[![加入QQ群](https://img.shields.io/badge/QQ群-点击加入-blue.svg)](https://qm.qq.com/cgi-bin/qm/qr?k=kSKwz-HRqrddrALgfLqCp7C2-aGZqPlv&jump_from=webapi&authKey=KUwPZ1lgzoIXjwIf/AfQ0UFFhRcUAO8VAdZk2kVdrGHQhxyhlgn30vX1SCX5Lu8d) (群号: 83958598)

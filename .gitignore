@@ -4,3 +4,8 @@
 desktop.ini
 **/__pycache__/
 *.pyc
+grok-storyboard-preview/assets/episode*
+grok-storyboard-preview/assets/generated/scenes/
+grok-storyboard-preview/assets/generated/videos/
+grok-storyboard-preview/tmp_audio/
+linggan-video-tools/outputs/

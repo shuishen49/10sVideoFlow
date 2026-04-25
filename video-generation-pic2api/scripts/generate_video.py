@@ -304,8 +304,17 @@ def main():
 
     status_url = f'{base_url}/video/generations/{task_id}'
     start = time.time()
+    last_stat_resp = {}
+    last_poll_error = ''
 
     while True:
+        if time.time() - start > args.timeout:
+            print('status=timeout')
+            if last_poll_error:
+                print('last_error=', last_poll_error)
+            print('last_response=', json.dumps(last_stat_resp, ensure_ascii=False))
+            sys.exit(3)
+
         try:
             code, stat_resp = request_with_retry(
                 'GET',
@@ -318,8 +327,24 @@ def main():
                 timeout=120,
             )
         except error.URLError as e:
-            print(f'查询失败: 网络连接异常: {e}', file=sys.stderr)
-            sys.exit(1)
+            last_poll_error = f'network: {e}'
+            print(f'poll_transient_error= {last_poll_error}', file=sys.stderr)
+            time.sleep(max(1, args.interval))
+            continue
+        except Exception as e:
+            last_poll_error = f'exception: {e}'
+            print(f'poll_transient_error= {last_poll_error}', file=sys.stderr)
+            time.sleep(max(1, args.interval))
+            continue
+
+        last_stat_resp = stat_resp if isinstance(stat_resp, dict) else {'raw': str(stat_resp)}
+
+        # 轮询阶段遇到上游 5xx/网关抖动时，不立刻判失败，继续轮询直到总超时
+        if code >= 500:
+            last_poll_error = f'http_status={code}'
+            print(f'poll_transient_http= {code}', file=sys.stderr)
+            time.sleep(max(1, args.interval))
+            continue
 
         if code < 200 or code >= 300:
             print('查询失败:', json.dumps(stat_resp, ensure_ascii=False), file=sys.stderr)
@@ -341,11 +366,6 @@ def main():
             print('status=failed')
             print('detail=', json.dumps(stat_resp, ensure_ascii=False))
             sys.exit(1)
-
-        if time.time() - start > args.timeout:
-            print('status=timeout')
-            print('last_response=', json.dumps(stat_resp, ensure_ascii=False))
-            sys.exit(3)
 
         time.sleep(max(1, args.interval))
 
